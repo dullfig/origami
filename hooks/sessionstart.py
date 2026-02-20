@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """SessionStart hook for context folding.
 
-Runs after compaction (or on session resume).  Injects the fold index
-plus any unfolded sections into the new context so Opus has a complete
-narrative thread at variable resolution.
+Runs after compaction (matcher: compact) or session resume (matcher: resume).
+Injects the fold index plus any unfolded sections into the new context so
+the model has a complete narrative thread at variable resolution.
 
 Input (stdin JSON):
-  { "source": "compact" | "resume" | ... }
+  { "session_id": "...", "source": "compact|resume", "model": "...", ... }
 
 Output (stdout, exit 0):
   Text to inject into the conversation context
@@ -40,11 +40,8 @@ def main():
     except (json.JSONDecodeError, Exception):
         hook_input = {}
 
-    source = hook_input.get("source", "")
-    # Inject on compact, resume, or cold start (empty source)
-    if source not in ("compact", "resume", ""):
-        sys.exit(1)
-
+    # Matcher in hooks.json already filters to compact/resume.
+    # Just load fold state and inject.
     store = FoldStore()
     state = store.load_state()
 

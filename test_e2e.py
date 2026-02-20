@@ -180,11 +180,8 @@ def main():
 
         check("precompact exits 0", result.returncode == 0,
               f"exit={result.returncode}, stderr={result.stderr[:200]}")
-        check("precompact produces output", len(result.stdout) > 0)
-        check("output contains FOLD INDEX",
-              "FOLD INDEX" in result.stdout)
-        check("output contains compaction instructions",
-              "COMPACTION INSTRUCTIONS" in result.stdout)
+        check("precompact is silent (read-only hook)", len(result.stdout) == 0,
+              f"stdout should be empty, got {len(result.stdout)} chars")
 
         # ── Phase 2: Verify Fold State ────────────────────────────
         print("\n--- Phase 2: Verify Fold State ---")
