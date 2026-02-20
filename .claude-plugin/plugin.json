@@ -5,7 +5,7 @@
   "license": "MIT",
   "author": { "name": "dullfig" },
   "homepage": "https://github.com/dullfig/origami",
-  "hooks": "hooks/hooks.json",
-  "skills": ["skills/context-folding"],
-  "commands": ["commands"]
+  "hooks": "./hooks/hooks.json",
+  "skills": ["./skills/context-folding"],
+  "commands": ["./commands"]
 }
