@@ -1,0 +1,8 @@
+node_modules/
+__pycache__/
+*.pyc
+.claude/context-folding/
+*.egg-info/
+dist/
+build/
+.env

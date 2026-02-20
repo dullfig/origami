@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "context-folding": {
+      "command": "node",
+      "args": ["server/index.js"]
+    }
+  }
+}

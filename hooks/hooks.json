@@ -1,0 +1,18 @@
+{
+  "hooks": {
+    "PreCompact": [
+      {
+        "type": "command",
+        "command": "python hooks/precompact.py",
+        "timeout": 30000
+      }
+    ],
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "python hooks/sessionstart.py",
+        "timeout": 10000
+      }
+    ]
+  }
+}
