@@ -87,7 +87,13 @@ Fold state is stored at `.claude/context-folding/` in the project root:
 
 ## Token Budget
 
-The system targets keeping injected context under 40% of the context window (80k tokens for a 200k window). Sections are unfolded greedily by relevance score until the budget is exhausted. Summaries are always included regardless of budget.
+Aggressive folding by default. Research ([Lost in the Middle](https://arxiv.org/abs/2307.03172), [context length vs. performance](https://arxiv.org/abs/2510.05381)) shows LLM performance degrades well before context is exhausted. The system targets:
+
+- **20% of context window** max for injected content (40k tokens for a 200k window)
+- **Max 3 sections unfolded** simultaneously
+- **0.7 relevance threshold** to unfold (only highly relevant sections)
+
+Summaries are always included regardless of budget. The model can still unfold on demand via the MCP tool when it needs specific detail.
 
 ## Architecture
 

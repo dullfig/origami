@@ -61,11 +61,13 @@ auth.mid>refac: jwt.decode>jwt.verify | tok.refresh.chain.fix | D:auth.mid.ts,au
 
 ## Token Awareness
 
-Each fold shows its token count. Be mindful of total context usage:
-- Unfold only what you need
-- Fold sections back when done
-- If many sections are unfolded, consider folding low-relevance ones
+Each fold shows its token count. Research shows LLM performance degrades
+well before context is exhausted, so **aggressive folding is preferred**:
+- Unfold ONLY what you actively need right now
+- Fold sections back IMMEDIATELY when done
+- Prefer re-reading a summary over keeping a section unfolded "just in case"
+- Maximum 3 sections unfolded at once
 
-The system automatically manages a token budget (40% of context window)
-and will force-fold sections if over budget, but proactive management
-keeps your context lean and fast.
+The system enforces a tight token budget (20% of context window, max 3
+simultaneous unfolds). Keep context lean - smaller context means better
+reasoning on what's actually there.

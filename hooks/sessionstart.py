@@ -23,9 +23,14 @@ from core.fold_store import FoldStore
 from core.token_counter import estimate_tokens
 
 
-# Target: keep injected context under 40 % of context window
+# Aggressive folding: research shows LLM performance degrades well before
+# context is exhausted (7-15k tokens in "Lost in the Middle" and related
+# studies).  Keep injected context lean - 20% of window max, and cap the
+# number of simultaneously unfolded sections to avoid the "lost in the
+# middle" U-curve where mid-context information is effectively invisible.
 CONTEXT_WINDOW = 200_000
-BUDGET = int(CONTEXT_WINDOW * 0.4)  # 80 000 tokens
+BUDGET = int(CONTEXT_WINDOW * 0.20)  # 40 000 tokens
+MAX_UNFOLDED = 3  # never unfold more than 3 sections at once
 
 
 def main():
@@ -62,11 +67,11 @@ def main():
     for fold in by_relevance:
         if fold["status"] == "unfolded":
             dtok = fold.get("detail_tokens", 0)
-            if dtok <= remaining:
+            if dtok <= remaining and len(unfold_ids) < MAX_UNFOLDED:
                 unfold_ids.add(fold["id"])
                 remaining -= dtok
             else:
-                fold["status"] = "folded"  # over budget - force fold
+                fold["status"] = "folded"  # over budget or cap hit
 
     # ── Build context injection ───────────────────────────────────────
     total_stored = sum(f.get("detail_tokens", 0) for f in state["folds"])
@@ -95,7 +100,7 @@ def main():
 
         lines.append("")
 
-    lines.append("Use the unfold_section tool to expand any folded section.")
+    lines.append("Call the origami_guide tool for instructions on using context folding.")
 
     # ── Persist any budget-forced status changes ──────────────────────
     store.save_state(state)

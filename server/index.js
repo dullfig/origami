@@ -22,6 +22,25 @@ const {
 const fs = require("fs");
 const path = require("path");
 
+// ── plugin guide (returned by origami_guide tool) ───────────────────
+
+const PLUGIN_ROOT = path.dirname(__dirname);
+let _guideCache = null;
+
+function loadGuide() {
+  if (_guideCache) return _guideCache;
+  const skillPath = path.join(PLUGIN_ROOT, "skills", "context-folding", "SKILL.md");
+  try {
+    _guideCache = fs.readFileSync(skillPath, "utf-8");
+  } catch {
+    _guideCache =
+      "Origami context folding is active. Use unfold_section to expand " +
+      "folded sections, fold_section to collapse them, list_folds to see " +
+      "all sections, and write_summary to update fold summaries.";
+  }
+  return _guideCache;
+}
+
 // ── paths ────────────────────────────────────────────────────────────
 
 const FOLD_DIR = path.join(process.cwd(), ".claude", "context-folding");
@@ -67,6 +86,16 @@ const server = new Server(
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
+    {
+      name: "origami_guide",
+      description:
+        "Get the full Origami context folding guide. " +
+        "CALL THIS FIRST when you see [CONTEXT FOLDING] or fold IDs (F001, F002...) in your context.",
+      inputSchema: {
+        type: "object",
+        properties: {},
+      },
+    },
     {
       name: "unfold_section",
       description:
@@ -137,6 +166,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   switch (name) {
+    // ── guide ──────────────────────────────────────────────────────
+    case "origami_guide": {
+      return textResult(loadGuide());
+    }
+
     // ── unfold ─────────────────────────────────────────────────────
     case "unfold_section": {
       const foldId = args.fold_id;

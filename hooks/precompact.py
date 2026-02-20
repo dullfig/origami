@@ -86,7 +86,7 @@ def main():
         ]
         scores = score_relevance(summaries, current_context)
 
-        threshold = 0.5
+        threshold = 0.7  # aggressive: only unfold highly relevant sections
         for fold in state["folds"]:
             score = scores.get(fold["id"], 0.3)
             fold["relevance_score"] = score
