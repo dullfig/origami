@@ -1,7 +1,7 @@
 {
-  "name": "context-folding",
+  "name": "origami",
   "version": "1.0.0",
-  "description": "Context folding - keeps full conversation history at variable resolution instead of lossy compaction",
+  "description": "Origami - context folding for Claude Code. Keeps full conversation history at variable resolution instead of lossy compaction.",
   "hooks": "hooks/hooks.json",
   "skills": ["skills/context-folding"],
   "commands": ["commands"]

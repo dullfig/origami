@@ -1,7 +1,11 @@
 {
-  "name": "context-folding",
+  "name": "origami",
   "version": "1.0.0",
-  "description": "Context folding plugin for Claude Code - keeps full conversation history at variable resolution",
+  "description": "Origami - context folding plugin for Claude Code. Keeps full conversation history at variable resolution.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dullfig/origami.git"
+  },
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js"

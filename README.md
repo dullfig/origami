@@ -1,6 +1,6 @@
-# Context Folding for Claude Code
+# Origami
 
-A plugin that replaces lossy compaction with **variable-resolution context**: every conversation section keeps an always-visible self-compressed summary, with full detail stored on disk and expandable on demand.
+Context folding for Claude Code. Replaces lossy compaction with **variable-resolution context**: every conversation section keeps an always-visible self-compressed summary, with full detail stored on disk and expandable on demand.
 
 ## How It Works
 
@@ -45,8 +45,8 @@ Normal conversation flow
 ### Setup
 
 ```bash
-git clone <this-repo> context-folding
-cd context-folding
+git clone https://github.com/dullfig/origami.git
+cd origami
 npm install
 pip install -r requirements.txt
 ```
