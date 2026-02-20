@@ -10,9 +10,6 @@
   "scripts": {
     "start": "node server/index.js"
   },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1"
-  },
   "engines": {
     "node": ">=18.0.0"
   },

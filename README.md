@@ -47,9 +47,10 @@ Normal conversation flow
 ```bash
 git clone https://github.com/dullfig/origami.git
 cd origami
-npm install
 pip install -r requirements.txt
 ```
+
+The MCP server is self-contained (no `npm install` needed — zero Node.js dependencies).
 
 Then add the plugin to your Claude Code project (copy or symlink into your project, or configure via Claude Code settings).
 

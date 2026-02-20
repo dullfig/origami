@@ -4,5 +4,8 @@
   "description": "Origami - context folding for Claude Code. Keeps full conversation history at variable resolution instead of lossy compaction.",
   "license": "MIT",
   "author": { "name": "dullfig" },
-  "homepage": "https://github.com/dullfig/origami"
+  "homepage": "https://github.com/dullfig/origami",
+  "hooks": "hooks/hooks.json",
+  "skills": ["skills/context-folding"],
+  "commands": ["commands"]
 }
