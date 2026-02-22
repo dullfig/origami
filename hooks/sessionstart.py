@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """SessionStart hook for context folding.
 
-Runs after compaction (matcher: compact) or session resume (matcher: resume).
-Injects the fold index plus any unfolded sections into the new context so
-the model has a complete narrative thread at variable resolution.
+Runs on startup, after compaction (matcher: compact), or session resume.
+ALWAYS injects context folding awareness — even when no folds exist yet.
+When folds are present, injects the fold index plus any unfolded sections
+so the model has a complete narrative thread at variable resolution.
 
 Input (stdin JSON):
-  { "session_id": "...", "source": "compact|resume", "model": "...", ... }
+  { "session_id": "...", "source": "compact|resume|startup", "model": "...", ... }
 
 Output (stdout, exit 0):
   Text to inject into the conversation context
@@ -32,6 +33,24 @@ CONTEXT_WINDOW = 200_000
 BUDGET = int(CONTEXT_WINDOW * 0.20)  # 40 000 tokens
 MAX_UNFOLDED = 3  # never unfold more than 3 sections at once
 
+AWARENESS_HEADER = """\
+[CONTEXT FOLDING ACTIVE — Origami]
+You have a context folding system. Your conversation history is preserved at
+variable resolution — each section has an always-visible summary, with full
+detail stored on disk and expandable on demand.
+
+Available MCP tools:
+  unfold_section(fold_id) — expand a folded section to full detail
+  fold_section(fold_id)   — collapse back to summary-only
+  list_folds()            — show all sections with status and summaries
+  write_summary(fold_id, summary) — update a fold's self-compressed summary
+  origami_guide()         — get the full usage guide
+
+When you see fold IDs like [F001 | FOLDED | 3200 tok], you can unfold them
+to see the full conversation detail. Fold sections back when done to keep
+context lean. Prefer aggressive folding — smaller context = better reasoning.
+"""
+
 
 def main():
     # ── Read hook input ───────────────────────────────────────────────
@@ -40,13 +59,17 @@ def main():
     except (json.JSONDecodeError, Exception):
         hook_input = {}
 
-    # Matcher in hooks.json already filters to compact/resume.
-    # Just load fold state and inject.
     store = FoldStore()
     state = store.load_state()
 
+    lines = [AWARENESS_HEADER]
+
     if not state["folds"]:
-        sys.exit(1)  # nothing to inject
+        # No folds yet — inject awareness only
+        lines.append("No folds stored yet. Folds will appear after your first compaction.")
+        lines.append("")
+        sys.stdout.write("\n".join(lines))
+        sys.exit(0)
 
     # ── Token budget management ───────────────────────────────────────
     # Summaries always included
@@ -72,11 +95,10 @@ def main():
 
     # ── Build context injection ───────────────────────────────────────
     total_stored = sum(f.get("detail_tokens", 0) for f in state["folds"])
-    lines = [
-        f"[CONTEXT FOLDING - {len(state['folds'])} sections, "
-        f"{total_stored} tokens stored]",
-        "",
-    ]
+    lines.append(
+        f"[{len(state['folds'])} sections, {total_stored} tokens stored]"
+    )
+    lines.append("")
 
     for fold in state["folds"]:
         fid = fold["id"].upper().replace("FOLD-", "F")
@@ -96,8 +118,6 @@ def main():
                 lines.append("--- END DETAIL ---")
 
         lines.append("")
-
-    lines.append("Call the origami_guide tool for instructions on using context folding.")
 
     # ── Persist any budget-forced status changes ──────────────────────
     store.save_state(state)

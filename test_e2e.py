@@ -11,6 +11,7 @@ Simulates the full lifecycle:
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -114,11 +115,50 @@ def run_hook(script, stdin_data):
     return result
 
 
+def mcp_frame(msg):
+    """Frame a JSON-RPC message with Content-Length header per MCP stdio spec.
+
+    Returns bytes to avoid text-mode \\r\\n mangling on Windows.
+    """
+    json_bytes = json.dumps(msg).encode("utf-8")
+    header = f"Content-Length: {len(json_bytes)}\r\n\r\n".encode("ascii")
+    return header + json_bytes
+
+
+def parse_mcp_responses(raw_output):
+    """Parse Content-Length framed MCP responses from raw bytes."""
+    responses = []
+    buf = raw_output
+    while buf:
+        header_end = buf.find(b"\r\n\r\n")
+        if header_end == -1:
+            break
+        header = buf[:header_end].decode("ascii", errors="replace")
+        match = re.search(r"Content-Length:\s*(\d+)", header, re.IGNORECASE)
+        if not match:
+            buf = buf[header_end + 4:]
+            continue
+        length = int(match.group(1))
+        body_start = header_end + 4
+        if len(buf) < body_start + length:
+            break
+        body = buf[body_start:body_start + length]
+        buf = buf[body_start + length:]
+        try:
+            responses.append(json.loads(body))
+        except json.JSONDecodeError:
+            continue
+    return responses
+
+
 def mcp_call(method, params=None, req_id=1):
-    """Send a JSON-RPC request to the MCP server and return the response."""
-    messages = [
-        # Initialize
-        json.dumps({
+    """Send a JSON-RPC request to the MCP server and return the response.
+
+    Uses binary mode to avoid Windows text-mode \\r\\n translation that
+    mangles the Content-Length framing.
+    """
+    stdin_data = b"".join([
+        mcp_frame({
             "jsonrpc": "2.0", "id": 0, "method": "initialize",
             "params": {
                 "protocolVersion": "2024-11-05",
@@ -126,34 +166,24 @@ def mcp_call(method, params=None, req_id=1):
                 "clientInfo": {"name": "test", "version": "1.0.0"},
             },
         }),
-        # The actual request
-        json.dumps({
+        mcp_frame({
             "jsonrpc": "2.0", "id": req_id, "method": method,
             "params": params or {},
         }),
-    ]
-    stdin_data = "\n".join(messages) + "\n"
+    ])
 
     result = subprocess.run(
         [NODE, os.path.join(PLUGIN_ROOT, "server", "index.js")],
         input=stdin_data,
         capture_output=True,
-        text=True,
         cwd=PLUGIN_ROOT,
         timeout=10,
     )
 
-    # Parse responses - find our request's response
-    for line in result.stdout.strip().split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            resp = json.loads(line)
-            if isinstance(resp, dict) and resp.get("id") == req_id:
-                return resp
-        except json.JSONDecodeError:
-            continue
+    responses = parse_mcp_responses(result.stdout)
+    for resp in responses:
+        if isinstance(resp, dict) and resp.get("id") == req_id:
+            return resp
     return None
 
 
@@ -222,6 +252,8 @@ def main():
         check("sessionstart produces output", len(result2.stdout) > 0)
         check("output contains CONTEXT FOLDING",
               "CONTEXT FOLDING" in result2.stdout)
+        check("output contains awareness header",
+              "unfold_section" in result2.stdout and "fold_section" in result2.stdout)
         check("output references origami_guide",
               "origami_guide" in result2.stdout)
 
@@ -229,6 +261,28 @@ def main():
         for fold in state["folds"]:
             fid = fold["id"].upper().replace("FOLD-", "F")
             check(f"{fid} in sessionstart output", fid in result2.stdout)
+
+        # ── Phase 3b: SessionStart with NO folds ──────────────────
+        print("\n--- Phase 3b: SessionStart with No Folds ---")
+        saved_state = json.loads(json.dumps(state))  # deep copy
+        empty_state = {"version": 1, "session_id": None, "total_summary_tokens": 0, "folds": []}
+        with open(state_path, "w") as f:
+            json.dump(empty_state, f)
+
+        result2b = run_hook("sessionstart.py", json.dumps({"source": "startup"}))
+
+        check("sessionstart exits 0 with no folds", result2b.returncode == 0,
+              f"exit={result2b.returncode}, stderr={result2b.stderr[:200]}")
+        check("still injects awareness header",
+              "CONTEXT FOLDING" in result2b.stdout)
+        check("mentions no folds yet",
+              "No folds" in result2b.stdout)
+        check("mentions available tools",
+              "unfold_section" in result2b.stdout)
+
+        # Restore state
+        with open(state_path, "w") as f:
+            json.dump(saved_state, f, indent=2)
 
         # ── Phase 4: MCP Server - origami_guide ───────────────────
         print("\n--- Phase 4: MCP Server - origami_guide ---")
