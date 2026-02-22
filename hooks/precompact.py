@@ -16,9 +16,14 @@ Input (stdin JSON):
 Output: none (exit 0 to allow compaction to proceed)
 """
 
+import io
 import json
 import os
 import sys
+
+# Force UTF-8 on Windows (cp1252 can't encode Unicode chars in fold content)
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 # Resolve plugin root so core/ imports work regardless of cwd
 _PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

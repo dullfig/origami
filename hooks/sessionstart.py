@@ -13,9 +13,13 @@ Output (stdout, exit 0):
   Text to inject into the conversation context
 """
 
+import io
 import json
 import os
 import sys
+
+# Force UTF-8 on Windows (cp1252 can't encode → and other Unicode chars)
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 _PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _PLUGIN_ROOT)
