@@ -111,6 +111,9 @@ is over budget so it folds everything not clearly needed.
 | `hydrate(fold_id, anchor?)` | Expands a fold to its full stored content. Call it before re-running a tool whose result was folded — a re-run may not reproduce it (files change, tests flake, output drifts). `fold_id` appears in `[origami fold-…]` stubs and in `hydrate://` links; pass a link's `#fragment` as `anchor` when a specific link motivated the call. The second hydrate of a given fold pins it: the next sweep restores it inline and it stays open until unpinned. |
 | `unpin(fold_id)` | Releases a pinned fold so it becomes fold-eligible again. Use it when pinned content stops earning its place in context — the recovery path for a pin that hysteresis triggered prematurely. |
 
+Registered tool names are `mcp__origami__hydrate` and `mcp__origami__unpin`;
+the model sees and calls them by these names.
+
 Every `hydrate` and `unpin` call is appended to the event log (see Data
 storage) — the future training set for anticipatory prefetch.
 
