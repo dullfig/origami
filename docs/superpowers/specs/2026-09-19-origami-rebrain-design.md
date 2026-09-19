@@ -165,3 +165,29 @@ Origami sweeps ride the compaction machinery, so a user's classic **PostCompact*
 - Anticipatory prefetch trained on the event log; deterministic triggers first (about to edit a file → pre-hydrate its last read).
 - Range hydration if the log shows large folds hydrated for small slices.
 - Classic-hooks (`updatedToolOutput`) degraded tier and transcript-synthesis floor for a public release.
+
+## Addendum (2026-09-19): anchor-text stubs and degradation observability
+
+### Stub format: anchor-text links
+
+The librarian writes stubs as markdown anchor text, not prose notes: 2–4 concept-level links per stub, grammar `[concept](hydrate://fold-NNN#slug)`.
+
+```
+[origami fold-012 · Read result folded] src/auth.ts (480 lines): [JWT validation](hydrate://fold-012#jwt), [refresh flow](hydrate://fold-012#refresh), [SECRET_ROTATION constant](hydrate://fold-012#rotation)
+```
+
+Rationale: hydrating on a stub is a taught reflex and taught reflexes decay over long sessions; anchor text is the most battle-tested advertisement format there is, and the librarian writes it while seeing the content it anchors. Entity-level links also attack the under-selling-stub failure: one generic ad becomes several chances for future relevance to match. The model still recovers content through the `hydrate` tool (links are affordance, not transport); `hydrate` accepts an optional `anchor` argument the model passes when a specific link motivated the call.
+
+**v1 ignores fragments for retrieval** — every hydrate returns the whole fold. The `#slug` grammar reserves range hydration's addressing scheme before it is built, and the logged `anchor` field records which concept pulled each hydrate — a far richer prefetch training signal than fold ids alone.
+
+### Degradation watchlist
+
+The artifact layer cannot fail silently (folds are exact bytes on disk); the danger lives in the advertisement layer. Three failure families, each with a signature:
+
+1. **Page fault never raised.** Cheap form: the model re-runs a tool instead of hydrating (re-Reads a folded file). Instrumented in v1: a `tool.call` observer logs a `missed_hydrate` event when a call's target matches a live fold — the system's primary health metric. Dangerous form: proceeding on stub-level knowledge where full content mattered; signature is vagueness where there used to be line numbers.
+2. **Advertisement misleads.** Stub-induced confabulation: specific claims about folded content stated without hydrating. Audit by hydrating and diffing the claim; any mismatch is a P1 against the librarian's stub style. Quiet twin: under-selling stubs with zero hydrations that correlate with later re-work (visible in the event log).
+3. **Mechanical taxes.** Orphaned reasoning (assistant text cites folded evidence — wrong past conclusions get harder to catch); hydrate-rate droop over session age (reinforce the stub format, not the skill prose); and the already-measured sweep costs.
+
+### Canary acceptance test
+
+Plant a specific fact inside a bulky read, let it fold, then ask a question that requires the fact. Green = the session hydrates and answers correctly. No-hydrate + re-read = family 1 cheap; no-hydrate + confident wrong answer = family 1 dangerous or family 2. Run against a negative control (same question, plugin disabled). Part of the manual smoke protocol in v1; a scripted `claude plugin eval` suite is future work.

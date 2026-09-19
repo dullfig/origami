@@ -557,7 +557,7 @@ git commit -m "feat: rebuild() enforcing fold invariants, stubs, restores, reduc
 **Interfaces:**
 - Consumes: `$.fs` (`read`, `write`, `exists`), `$.store` (`get`, `set`, `keys`) — passed in as the `$` engine interface.
 - Produces:
-  - `type FoldEntry = { id: string; stub: string; state: 'folded' | 'pinned'; tool: string; toolUseId: string; originAge: number; sizeTokens: number; hydrations: number }` — `toolUseId` is how later sweeps exclude pinned folds from candidate selection after their content has been restored inline
+  - `type FoldEntry = { id: string; stub: string; state: 'folded' | 'pinned'; tool: string; toolUseId: string; inputKey: string; originAge: number; sizeTokens: number; hydrations: number }` — `toolUseId` is how later sweeps exclude pinned folds from candidate selection after their content has been restored inline; `inputKey` (the call's `file_path` when present, else the JSON of its input) is how the missed-hydrate observer matches a new tool call against a live fold
   - `newFoldId($): Promise<string>` — `fold-001`, `fold-002`, … (counter at store key `origami:seq`)
   - `putFold($, entry: FoldEntry, body: string): Promise<void>` — index at `origami:fold:<id>`, body at `.claude/origami/folds/<id>.md`
   - `getFold($, id: string): Promise<{ entry: FoldEntry; body: string } | undefined>`
@@ -578,7 +578,7 @@ test('fold ids increment and zero-pad', async ($) => {
 });
 
 test('putFold/getFold round-trips entry and body', async ($) => {
-  const entry = { id: 'fold-001', stub: 's', state: 'folded' as const, tool: 'Read', toolUseId: 'tA', originAge: 3, sizeTokens: 2000, hydrations: 0 };
+  const entry = { id: 'fold-001', stub: 's', state: 'folded' as const, tool: 'Read', toolUseId: 'tA', inputKey: 'a.ts', originAge: 3, sizeTokens: 2000, hydrations: 0 };
   await putFold($, entry, '# body\ncontent');
   const got = await getFold($, 'fold-001');
   expect(got!.entry.stub).toBe('s');
@@ -587,7 +587,7 @@ test('putFold/getFold round-trips entry and body', async ($) => {
 });
 
 test('setFold updates state; allFolds lists entries', async ($) => {
-  const entry = { id: 'fold-001', stub: 's', state: 'folded' as const, tool: 'Read', toolUseId: 'tA', originAge: 3, sizeTokens: 2000, hydrations: 0 };
+  const entry = { id: 'fold-001', stub: 's', state: 'folded' as const, tool: 'Read', toolUseId: 'tA', inputKey: 'a.ts', originAge: 3, sizeTokens: 2000, hydrations: 0 };
   await putFold($, entry, 'b');
   await setFold($, { ...entry, state: 'pinned', hydrations: 2 });
   const all = await allFolds($);
@@ -620,8 +620,13 @@ import type { EngineInterface } from 'claude-code';
 
 export type FoldEntry = {
   id: string; stub: string; state: 'folded' | 'pinned';
-  tool: string; toolUseId: string; originAge: number; sizeTokens: number; hydrations: number;
+  tool: string; toolUseId: string; inputKey: string;
+  originAge: number; sizeTokens: number; hydrations: number;
 };
+
+export function inputKeyOf(input: Record<string, unknown>): string {
+  return typeof input.file_path === 'string' ? input.file_path : JSON.stringify(input);
+}
 
 const SEQ = 'origami:seq';
 const FOLD = (id: string) => `origami:fold:${id}`;
@@ -724,12 +729,16 @@ test('aggressive mode states the budget pressure', async () => {
   expect(buildSweepPrompt([cand], false).includes('over budget')).toBe(false);
 });
 
+test('prompt teaches the anchor-link stub grammar', async () => {
+  expect(buildSweepPrompt([cand], false).includes('hydrate://FOLD#')).toBe(true);
+});
+
 test('parse round-trips well-formed replies', async () => {
-  const reply = `<decision id="tA" action="fold">Read src/auth.ts (JWT validation, refresh flow).</decision>`;
+  const reply = `<decision id="tA" action="fold">src/auth.ts: [JWT validation](hydrate://FOLD#jwt), [refresh flow](hydrate://FOLD#refresh)</decision>`;
   const d = parseSweepReply(reply, ['tA']);
   expect(d.length).toBe(1);
   expect(d[0].action).toBe('fold');
-  expect(d[0].stub.includes('JWT')).toBe(true);
+  expect(d[0].stub.includes('](hydrate://FOLD#jwt)')).toBe(true);
 });
 
 test('parse throws on missing or unknown ids', async () => {
@@ -762,8 +771,12 @@ export function buildSweepPrompt(candidates: readonly Candidate[], aggressive: b
     '  fold — a short stub suffices; full content stays recoverable on demand.',
     aggressive ? 'The working set is over budget: fold everything not clearly needed.' : '',
     'For EVERY candidate answer exactly one line:',
-    '<decision id="ID" action="keep|fold">one-to-three-line stub: what it is, what it contains, what one would ask for</decision>',
-    'Write the stub from the content you see. No other output.',
+    '<decision id="ID" action="keep|fold">stub</decision>',
+    'A stub is anchor text, not a note: name what it is, then 2-4 concept-level markdown links',
+    'to the most load-bearing things inside, grammar [concept](hydrate://FOLD#slug), where FOLD',
+    'is the literal token FOLD (replaced with the real fold id later) and #slug names the concept.',
+    'Example: src/auth.ts (480 lines): [JWT validation](hydrate://FOLD#jwt), [refresh flow](hydrate://FOLD#refresh), [SECRET_ROTATION](hydrate://FOLD#rotation)',
+    'Write anchors from the content you see. No other output.',
   ].filter(Boolean).join('\n');
   const body = candidates.map(c =>
     `<candidate id="${c.toolUseId}" tool="${c.tool}" input=${JSON.stringify(JSON.stringify(c.input))} age_turns="${c.ageTurns}">\n${c.text}\n</candidate>`
@@ -880,7 +893,7 @@ Expected: FAIL — `runSweep` not exported.
 import type { Register, EngineInterface, SessionCompactInput, SessionCompactResult, SessionMessage } from 'claude-code';
 import { selectCandidates, rebuild, estimateTokens, type FoldDecision, type RestoreDecision } from './rebuild';
 import { runLibrarian } from './librarian';
-import { newFoldId, putFold, getFold, setFold, allFolds, appendLog, type FoldEntry } from './store';
+import { newFoldId, putFold, getFold, setFold, allFolds, appendLog, inputKeyOf, type FoldEntry } from './store';
 
 // returns a result to answer with, or undefined = caller must pass through via next(e)
 export async function runSweep(
@@ -919,9 +932,10 @@ export async function runSweep(
       if (d.action !== 'fold') continue;
       const c = candidates.find(x => x.toolUseId === d.toolUseId)!;
       const id = await newFoldId($);
-      const entry: FoldEntry = { id, stub: d.stub, state: 'folded', tool: c.tool, toolUseId: c.toolUseId, originAge: c.ageTurns, sizeTokens: c.sizeTokens, hydrations: 0 };
+      const stub = d.stub.replaceAll('hydrate://FOLD#', `hydrate://${id}#`); // librarian writes the FOLD token; the real id lands here
+      const entry: FoldEntry = { id, stub, state: 'folded', tool: c.tool, toolUseId: c.toolUseId, inputKey: inputKeyOf(c.input), originAge: c.ageTurns, sizeTokens: c.sizeTokens, hydrations: 0 };
       await putFold($, entry, `# ${id} · ${c.tool} ${JSON.stringify(c.input)}\n\n${c.text}`);
-      foldDecisions.push({ toolUseId: d.toolUseId, foldId: id, stub: d.stub });
+      foldDecisions.push({ toolUseId: d.toolUseId, foldId: id, stub });
     }
     const outcome = rebuild(e.messages, foldDecisions, restores, cfg, aggressive);
     if (outcome.kind === 'insufficient') {
@@ -1092,18 +1106,20 @@ git commit -m "feat: mass-based sweep trigger with workingSetBudget backstop"
 
 **Interfaces:**
 - Consumes: `getFold`, `setFold`, `appendLog` (Task 4); `$.tool.register`; `on('tool.call', { tool }, ...)`.
-- Produces: `handleHydrate($, cfg, foldId): Promise<string>`, `handleUnpin($, foldId): Promise<string>` exported for testing; `register` registers both tools on `session.start` and serves them via `tool.call` hooks.
+- Produces: `handleHydrate($, cfg, foldId, anchor?): Promise<string>`, `handleUnpin($, foldId): Promise<string>`, `observeMissedHydrate($, e): Promise<void>` exported for testing; `register` registers both tools on `session.start`, serves them via `tool.call` hooks, and wires the missed-hydrate observer on every `tool.call`.
+
+The `anchor` argument records which stub link motivated a hydrate (`hydrate://fold-012#refresh` → anchor `refresh`). v1 logs it and otherwise ignores it — the whole fold comes back regardless; the field is the range-hydration addressing scheme and prefetch training signal reserved by the spec addendum. The missed-hydrate observer is the degradation health metric: a Read whose `file_path` matches a live (unpinned) fold's `inputKey` means the model re-ran a tool instead of hydrating.
 
 - [ ] **Step 1: Write failing tests**
 
 `tests/tools.test.ts`:
 ```ts
 import { test, expect } from 'claude-code/testing';
-import { handleHydrate, handleUnpin, readConfig } from '../hooks/origami';
+import { handleHydrate, handleUnpin, observeMissedHydrate, readConfig } from '../hooks/origami';
 import { putFold, getFold } from '../hooks/store';
 
 const cfg = readConfig(undefined);
-const entry = { id: 'fold-001', stub: 's', state: 'folded' as const, tool: 'Read', toolUseId: 'tA', originAge: 3, sizeTokens: 2000, hydrations: 0 };
+const entry = { id: 'fold-001', stub: 's', state: 'folded' as const, tool: 'Read', toolUseId: 'tA', inputKey: 'a.ts', originAge: 3, sizeTokens: 2000, hydrations: 0 };
 
 test('hydrate returns body, counts, pins at threshold, logs', async ($) => {
   await putFold($, entry, 'THE FULL BODY');
@@ -1133,6 +1149,25 @@ test('unknown ids return instructive errors, never throw', async ($) => {
   const u = await handleUnpin($, 'nonsense');
   expect(u.toLowerCase().includes('unknown')).toBe(true);
 });
+
+test('hydrate logs the motivating anchor when given', async ($) => {
+  await putFold($, entry, 'B');
+  await handleHydrate($, cfg, 'fold-001', 'refresh');
+  const log = String(await $.fs.read('.claude/origami/origami.log'));
+  expect(log.includes('"anchor":"refresh"')).toBe(true);
+});
+
+test('a Read matching a live fold logs missed_hydrate; pinned and non-matching do not', async ($) => {
+  await putFold($, entry, 'B');                                     // inputKey 'a.ts', state folded
+  await observeMissedHydrate($, { tool: 'Read', input: { file_path: 'a.ts' } });
+  await observeMissedHydrate($, { tool: 'Read', input: { file_path: 'other.ts' } });
+  const log1 = String(await $.fs.read('.claude/origami/origami.log'));
+  expect(log1.split('\n').filter(l => l.includes('"event":"missed_hydrate"')).length).toBe(1);
+  await putFold($, { ...entry, id: 'fold-002', state: 'pinned', inputKey: 'b.ts' }, 'B');
+  await observeMissedHydrate($, { tool: 'Read', input: { file_path: 'b.ts' } });   // pinned = content inline, re-read is fine
+  const log2 = String(await $.fs.read('.claude/origami/origami.log'));
+  expect(log2.split('\n').filter(l => l.includes('"event":"missed_hydrate"')).length).toBe(1);
+});
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1143,13 +1178,13 @@ Expected: FAIL — handlers not exported.
 - [ ] **Step 3: Implement (in `hooks/origami.ts`)**
 
 ```ts
-export async function handleHydrate($: EngineInterface, cfg: OrigamiConfig, foldId: string): Promise<string> {
+export async function handleHydrate($: EngineInterface, cfg: OrigamiConfig, foldId: string, anchor?: string): Promise<string> {
   const found = await getFold($, foldId);
   if (!found) return `Unknown fold id "${foldId}". Fold ids look like fold-001 and appear in [origami fold-…] stubs in the conversation.`;
   const hydrations = found.entry.hydrations + 1;
   const pinned = hydrations >= cfg.pinAfterHydrations && found.entry.state !== 'pinned';
   await setFold($, { ...found.entry, hydrations, state: pinned ? 'pinned' : found.entry.state });
-  await appendLog($, { event: 'hydrate', foldId, hydrations, originAge: found.entry.originAge });
+  await appendLog($, { event: 'hydrate', foldId, hydrations, originAge: found.entry.originAge, ...(anchor ? { anchor } : {}) });
   const note = pinned
     ? `\n\n[origami: ${foldId} has now been hydrated ${hydrations}× and is pinned — it will be restored inline and stay open. Call unpin("${foldId}") if that stops being useful.]`
     : '';
@@ -1163,6 +1198,19 @@ export async function handleUnpin($: EngineInterface, foldId: string): Promise<s
   await appendLog($, { event: 'unpin', foldId });
   return `${foldId} unpinned: it is fold-eligible again and will refold on the next sweep.`;
 }
+
+// The degradation health metric (spec addendum): a tool call whose target matches
+// a live fold means the model re-ran a tool instead of hydrating. Observe-only.
+export async function observeMissedHydrate(
+  $: EngineInterface, call: { tool: string; input: Record<string, unknown> },
+): Promise<void> {
+  try {
+    if (call.tool !== 'Read') return; // v1 watches the highest-signal case only
+    const key = inputKeyOf(call.input);
+    const match = (await allFolds($)).find(f => f.state === 'folded' && f.tool === 'Read' && f.inputKey === key);
+    if (match) await appendLog($, { event: 'missed_hydrate', foldId: match.id, tool: call.tool, inputKey: key });
+  } catch { /* observation must never break a tool call */ }
+}
 ```
 
 In `register`, add:
@@ -1170,8 +1218,8 @@ In `register`, add:
 on('session.start', async ($, e, next) => {
   await $.tool.register({
     name: 'hydrate',
-    description: 'Expand an origami fold to its full stored content. Use before re-running a tool whose result was folded — re-running may not reproduce it (files change, tests flake). fold_id appears in [origami fold-…] stubs.',
-    inputSchema: { type: 'object', properties: { fold_id: { type: 'string' } }, required: ['fold_id'] },
+    description: 'Expand an origami fold to its full stored content. Use before re-running a tool whose result was folded — re-running may not reproduce it (files change, tests flake). fold_id appears in [origami fold-…] stubs and in hydrate:// links; when a specific link motivated this call, pass its #fragment as anchor.',
+    inputSchema: { type: 'object', properties: { fold_id: { type: 'string' }, anchor: { type: 'string' } }, required: ['fold_id'] },
   });
   await $.tool.register({
     name: 'unpin',
@@ -1181,14 +1229,23 @@ on('session.start', async ($, e, next) => {
   return next(e);
 });
 on('tool.call', { tool: 'mcp__origami__hydrate' }, async ($, e) => {
-  return { text: await handleHydrate($, config, String((e as { fold_id?: unknown }).fold_id ?? '')) };
+  const input = e as { fold_id?: unknown; anchor?: unknown };
+  return { text: await handleHydrate($, config, String(input.fold_id ?? ''), typeof input.anchor === 'string' ? input.anchor : undefined) };
 });
 on('tool.call', { tool: 'mcp__origami__unpin' }, async ($, e) => {
   return { text: await handleUnpin($, String((e as { fold_id?: unknown }).fold_id ?? '')) };
 });
+on('tool.call', async ($, e, next) => {
+  // observe-only middleware: never blocks, never rewrites; main thread only
+  const call = e as { tool: string; agentId?: string; input?: Record<string, unknown> };
+  if (!call.agentId && call.tool === 'Read') {
+    await observeMissedHydrate($, { tool: call.tool, input: call.input ?? (e as unknown as Record<string, unknown>) });
+  }
+  return next(e);
+});
 ```
 
-(The exact `tool.call` result envelope — `{ text }` vs a richer shape — and where the tool's input lands on `e` are defined in the generated declarations' `ToolCallInput`/`ToolCallResult`; adapt the two thin handlers, not the exported logic.)
+(The exact `tool.call` result envelope — `{ text }` vs a richer shape — and where the tool's input lands on `e` (flat fields vs an `input` object) are defined in the generated declarations' `ToolCallInput`/`ToolCallResult`; adapt the three thin handlers, not the exported logic.)
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -1225,20 +1282,24 @@ description: Use when the conversation contains [origami fold-…] stubs, when y
 # Living with folded context
 
 This session runs Origami: bulky stale tool results are folded to disk and
-replaced with stubs like:
+replaced with stubs whose links advertise what is inside:
 
-    [origami fold-012 · Read result folded] src/auth.ts (480 lines) — JWT
-    validation, refresh flow, SECRET_ROTATION constant. — call
-    hydrate("fold-012") for the full content.
+    [origami fold-012 · Read result folded] src/auth.ts (480 lines):
+    [JWT validation](hydrate://fold-012#jwt),
+    [refresh flow](hydrate://fold-012#refresh),
+    [SECRET_ROTATION constant](hydrate://fold-012#rotation)
 
 A stub means you once knew this in full and can know it again instantly.
+A `hydrate://` link is followed by calling the `hydrate` tool with the
+link's fold id — and its `#fragment` as `anchor`, so the log learns which
+concept pulled you back.
 
 ## Rules
 
-1. **Hydrate before re-running.** If a stub covers what you need, call
-   `hydrate(fold_id)` instead of re-running the tool. A re-read is not
+1. **Hydrate before re-running.** If a stub's links cover what you need,
+   call `hydrate(fold_id)` instead of re-running the tool. A re-read is not
    idempotent: files change, tests flake, command output drifts. The fold is
-   the exact bytes you saw.
+   the exact bytes you saw. (Whole fold comes back regardless of anchor.)
 2. **Hydrated content may fold again** after a few turns. That is normal; the
    stub returns and hydrate still works.
 3. **Repeated need pins automatically.** The second hydrate of the same fold
@@ -1292,16 +1353,25 @@ In the session: ask Claude to Read 4–5 large files (>30k chars total), then ch
 5. Call `unpin` on it (ask the model to) → next sweep refolds it.
 6. `.claude/origami/origami.log` holds sweep records with `librarianInputTokens` and hydrate/unpin records.
 
-- [ ] **Step 3: Coexistence and scope checks**
+- [ ] **Step 3: Needle-behind-a-fold canary (the acceptance test)**
+
+Plant a distinctive fact in a bulky file (e.g. a comment `// CANARY: the rate limit is 7341 per hour` inside a 2000-line file), have Claude Read it along with the other large files, chat past the fold age, confirm the file folded, then ask: "what was the exact rate limit in that config?" Score it:
+- **Green:** Claude calls `hydrate` (ideally with the anchor of the matching link) and answers 7341.
+- **Family-1 cheap:** Claude re-Reads the file instead — the answer is right but `origami.log` gains a `missed_hydrate` record. Note it.
+- **Family-1 dangerous / family-2:** Claude answers confidently without hydrating or re-reading. Record the wrong value verbatim — this is a P1 against the stub style.
+
+Run the negative control once: same setup with the plugin disabled (unset the flag), confirm stock behavior for comparison. Repeat the canary with the fact behind an *unlinked* concept (something the librarian didn't anchor) to probe the under-selling failure.
+
+- [ ] **Step 4: Coexistence and scope checks**
 
 1. With a classic PostCompact hook configured (any command that writes its input JSON to a file), trigger an origami sweep and record the `trigger` value classic hooks receive. Expected `plugin`; whatever is observed goes verbatim into README's Coexistence section. If sweeps are NOT distinguishable from stock compaction there, note it as a finding to post on anthropics/claude-code#91870.
 2. Spawn a subagent (any Task/Agent call) mid-session; verify no fold stubs ever appear in its transcript and no sweep fires on its `turn.complete`.
 
-- [ ] **Step 4: Record findings**
+- [ ] **Step 5: Record findings**
 
-Write `docs/superpowers/specs/2026-09-19-smoke-findings.md`: what fired when, observed trigger values, stub quality (verbatim examples), token reductions from the log, anything surprising. Update README Coexistence with observed values.
+Write `docs/superpowers/specs/2026-09-19-smoke-findings.md`: what fired when, observed trigger values, canary outcomes (green / missed-hydrate / confabulation, with verbatim answers), stub quality (verbatim examples, link anchors included), token reductions and `missed_hydrate` counts from the log, anything surprising. Update README Coexistence with observed values.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add docs/superpowers/specs/2026-09-19-smoke-findings.md README.md
