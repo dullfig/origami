@@ -86,6 +86,8 @@ export function rebuild(
   const ages = turnAges(messages);
   const foldByUseId = new Map(folds.map(f => [f.toolUseId, f]));
   const restoreByUseId = new Map(restores.map(r => [r.toolUseId, r]));
+  const toolByUseId = new Map<string, string>();
+  for (const mm of messages) for (const u of mm.toolUses) toolByUseId.set(u.tool_use_id, u.tool);
   const massOf = (ms: readonly SessionMessage[]) =>
     ms.reduce((s, m) => s + estimateTokens(m.text)
       + (m.toolResults ?? []).reduce((a, r) => a + estimateTokens(r.text), 0)
@@ -100,8 +102,6 @@ export function rebuild(
     if (ages[mi] < protectedTurns) {
       throw new Error(`origami invariant: decision targets a message inside the protected recent turns (age ${ages[mi]})`);
     }
-    const toolByUseId = new Map<string, string>();
-    for (const mm of messages) for (const u of mm.toolUses) toolByUseId.set(u.tool_use_id, u.tool);
     return {
       role: m.role,
       text: m.text,
@@ -146,7 +146,7 @@ content. The full content is intact on disk — nothing is lost.
 Currently ${activeFolds} folds active.]`;
 }
 
-export const BANNER_ACK = "Understood — I'll follow hydrate:// links before re-running tools or claiming I never saw something, and I'll flag anomalies to the user.";
+export const BANNER_ACK = "Understood — I'll follow hydrate:// links before re-running tools or claiming I never saw something, and I'll flag anomalies to the user. [synthetic acknowledgment inserted by origami]";
 
 // Removes an existing banner pair if present: a user message whose text starts
 // with BANNER_PREFIX at index 0, plus the immediately following assistant
