@@ -30,6 +30,7 @@ Two developments change the picture:
 - Migration of v0 fold state (`.claude/context-folding/`): fresh start.
 - A `list_folds` tool or `/fold-status` command: the stubs in context *are* the index.
 - Handling `session.compact` events with `trigger: "precompute"`: skipped in v1.
+- Subagent transcripts. `turn.complete` fires for subagent loops too (events carry an `agentId`), so the trigger explicitly filters to the main thread; Origami never folds a subagent's context. Extending folding to subagents requires re-validating the rebuilder invariants there first — do not "helpfully" widen this scope.
 
 ## Architecture
 
@@ -57,7 +58,7 @@ Prerequisites after re-brain: Claude Code >= 2.1.259 with `CLAUDE_CODE_ENABLE_FU
 
 - Fold bodies: markdown files at `.claude/origami/folds/fold-NNN.md` via `$.fs.write` / `$.fs.read`. Body = the exact folded content plus a small header (tool, input, turn of origin).
 - Fold index: `$.store` keys — per fold: id, stub text, state (`folded` | `pinned`), origin turn, size estimate, hydration count.
-- Hydrate log: append-only `.claude/origami/hydrate.log` (JSONL: fold id, turns-since-fold, session id, timestamp). Written on every hydrate; never read by v1 logic.
+- Event log: append-only `.claude/origami/origami.log` — one JSONL stream for all readers. `hydrate` records (fold id, turns-since-fold, session id, timestamp), `unpin` records (fold id), and `sweep` records (tokensBefore, tokensAfter, librarian input and output tokens, folds created, aggressive flag). Written by v1, never read by v1 logic. Keeping recall events and sweep cost in the same stream means the future prefetch trainer cannot optimize recall while quietly ignoring what sweeps spend on the librarian.
 - Both `$.fs` and `$.store` persist across `--resume` and restarts.
 
 ### Component: Librarian (`librarian.ts`)
@@ -84,13 +85,13 @@ Pure function `(messages, decisions, foldIndex) → { messages, tokensBefore, to
 
 Three registrations:
 
-1. **`turn.complete` — trigger policy.** Estimate the mass of fold candidates: unpinned tool results older than `foldAgeTurns` turns. If candidate mass >= `minFoldMass` tokens, `await $.session.compact()` (in-flight guard, fast-jev pattern). Additionally, if live context exceeds `workingSetBudget` absolute tokens, the next sweep runs aggressive: `foldAgeTurns` is treated as 1 and the librarian prompt states that the working set is over budget and to fold everything not clearly needed. Context-window percentage is never consulted; behavior is identical at 200k and 1M windows.
+1. **`turn.complete` — trigger policy.** Main-thread events only: any event carrying a subagent `agentId` is passed through untouched. Estimate the mass of fold candidates: unpinned tool results older than `foldAgeTurns` turns. If candidate mass >= `minFoldMass` tokens, `await $.session.compact()` (in-flight guard, fast-jev pattern). Additionally, if live context exceeds `workingSetBudget` absolute tokens, the next sweep runs aggressive: `foldAgeTurns` is treated as 1 and the librarian prompt states that the working set is over budget and to fold everything not clearly needed. Context-window percentage is never consulted; behavior is identical at 200k and 1M windows.
 2. **`session.compact` — the interceptor.** Fires for plugin-triggered sweeps, manual `/compact`, and the (rare) auto-threshold — one path. Assemble candidates → librarian scores and writes stubs → store persists bodies and index → rebuilder produces messages → return `{messages, tokensBefore, tokensAfter}`. On *any* failure (model error, fs/store error, unparseable librarian output, insufficient reduction on a real compaction) → `next(event)`: built-in compaction runs; on insufficient reduction for a plugin-triggered sweep → `{skip}` (nothing needed doing).
-3. **`hydrate(fold_id)` — registered tool.** Reads the fold body, returns it as the tool result (lands at the tail; prefix cache untouched). Increments hydration count; at 2, the fold is pinned: next sweep restores it inline permanently. Every call appended to the hydrate log. Unknown fold id → error result naming the valid id format, never a throw.
+3. **`hydrate(fold_id)` and `unpin(fold_id)` — registered tools.** `hydrate` reads the fold body and returns it as the tool result (lands at the tail; prefix cache untouched). It increments the hydration count; at `pinAfterHydrations`, the fold is pinned: the next sweep restores it inline and it stays open — not re-folded — until unpinned. `unpin` is the inverse and the recovery path when hysteresis pins something prematurely: it resets the fold to `folded`-eligible and zeroes its hydration count, so the content refolds on the next sweep. Expected to be rarely used; it exists so a wrong pin is not permanent. Both log to the event log. Unknown fold id → error result naming the valid id format, never a throw.
 
 ### Skill (`skills/context-folding/SKILL.md`)
 
-Rewritten to teach the main model: stubs mean "you once knew this in full"; call `hydrate` before re-running a tool to recover known content (a re-read may not be idempotent — files change, tests flake); hydrated content may fold again after use; repeated need pins automatically.
+Rewritten to teach the main model: stubs mean "you once knew this in full"; call `hydrate` before re-running a tool to recover known content (a re-read may not be idempotent — files change, tests flake); hydrated content may fold again after use; repeated need pins automatically; `unpin` releases a pin that is no longer earning its keep.
 
 ## Flow
 
@@ -141,22 +142,26 @@ Token counts estimated without a tokenizer (chars/4 heuristic, calibrated agains
 - `hydrate` failures return error text as the tool result; they never throw out of the hook.
 - In-flight guard prevents re-entrant sweeps; `$.session.compact()` rejects while a turn runs — caught and retried at the next `turn.complete`.
 
+## Coexistence with classic hooks
+
+Origami sweeps ride the compaction machinery, so a user's classic **PostCompact** hooks will fire after every sweep unless gated. This matters because such hooks assume *lossy* compaction (e.g., a user-level re-grounding banner telling the model to re-read memory after a summary) — advice that is noise after an Origami sweep, which preserves conversation text verbatim and keeps folded content recoverable. During smoke testing, capture what a `$.session.compact()`-triggered sweep reports to classic PostCompact hooks (expected: trigger `plugin`, distinct from `manual`/`auto`), document it in the README, and recommend users gate lossy-compaction hooks to `manual`/`auto` matchers so they fire only on stock compaction — the only kind that still deserves them. If the trigger value turns out not to be distinguishable in classic hooks, that is a finding to raise on anthropics/claude-code#91870, and the README documents the collision instead.
+
 ## Testing
 
 - `rebuild.ts` invariants: pure unit tests, including orphaned-pair, parallel-sibling, pinned-restore, and below-ratio cases.
 - Hook behavior: `claude plugin test` with the `'claude-code/testing'` kit (mock store, clock, env): trigger fires at mass threshold and not below; failure paths fall through to `next`; hydrate round-trip and pin-at-2.
-- Manual smoke: a session filled with bulky reads; verify stubs appear, `hydrate` recovers content verbatim, second hydrate pins.
+- Manual smoke: a session filled with bulky reads; verify stubs appear, `hydrate` recovers content verbatim, second hydrate pins, `unpin` releases and the content refolds on the next sweep. Also verify the PostCompact trigger value a sweep reports (see Coexistence) and that a session with active subagents never folds their threads.
 
 ## Risks
 
 - **Early-access surface.** The `$` API may change between Claude Code releases. Mitigation: pin `types/claude-code.d.ts` (regenerate with `/plugin-types` after upgrades), state the supported version in README — same discipline as fast-jev-compaction.
 - **Cache cost.** Every sweep is a paid cache bust from the edit point. Mitigation: mass trigger keeps edits near the tail; `minReductionRatio` gate; measure with `tokensBefore/After`.
-- **Librarian judgment.** A bad fold hides content behind a stub — recoverable via hydrate (the design premise: wrong guesses are page faults, not data loss), but chronic bad stubs erode trust. Mitigation: stub-quality eyeballing in smoke tests; hydrate log reveals systematically re-fetched folds.
+- **Librarian judgment.** A bad fold hides content behind a stub — recoverable via hydrate (the design premise: wrong guesses are page faults, not data loss), but chronic bad stubs erode trust. Mitigation: stub-quality eyeballing in smoke tests; the event log reveals systematically re-fetched folds.
 - **Feature-flag dependency.** If Mods ships in changed form, the wiring layer (`origami.ts`) absorbs the change; rebuilder/librarian/store are surface-independent.
 
 ## Future (recorded, not built)
 
-- Anticipatory prefetch trained on the hydrate log; deterministic triggers first (about to edit a file → pre-hydrate its last read).
+- **Conversation-section folding — the first v2 candidate.** V0's original granularity on top of v1's tool-result granularity: a superseded plan or stale discussion folds to a visible tombstone stub ("old plan (superseded) — hydrate if curious") instead of being re-authored or silently summarized away. This is the half that completes the fold principle; the v1 deferral is sequencing, not deprioritization.
+- Anticipatory prefetch trained on the event log; deterministic triggers first (about to edit a file → pre-hydrate its last read).
 - Range hydration if the log shows large folds hydrated for small slices.
 - Classic-hooks (`updatedToolOutput`) degraded tier and transcript-synthesis floor for a public release.
-- Fold summaries of *conversation sections* (v0's original granularity) on top of v1's tool-result granularity.
