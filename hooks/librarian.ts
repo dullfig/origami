@@ -1,7 +1,8 @@
-import type { EngineInterface } from 'claude-code';
 import { estimateTokens, type Candidate } from './rebuild';
 
 export type LibrarianDecision = { toolUseId: string; action: 'keep' | 'fold'; stub: string };
+
+export type CompleteFn = (req: { model: string; prompt: string; maxTokens?: number }) => Promise<string>;
 
 export function buildSweepPrompt(candidates: readonly Candidate[], aggressive: boolean): string {
   const head = [
@@ -36,10 +37,10 @@ export function parseSweepReply(reply: string, expectedIds: readonly string[]): 
 }
 
 export async function runLibrarian(
-  $: EngineInterface, model: string, candidates: readonly Candidate[], aggressive: boolean,
+  complete: CompleteFn, model: string, candidates: readonly Candidate[], aggressive: boolean,
 ): Promise<{ decisions: LibrarianDecision[]; inputTokens: number; outputTokens: number }> {
   const prompt = buildSweepPrompt(candidates, aggressive);
-  const reply = await $.model.complete({ model, prompt, maxTokens: 4096 });
+  const reply = await complete({ model, prompt, maxTokens: 4096 });
   const decisions = parseSweepReply(reply, candidates.map(c => c.toolUseId));
   return { decisions, inputTokens: estimateTokens(prompt), outputTokens: estimateTokens(reply) };
 }

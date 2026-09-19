@@ -1,4 +1,11 @@
-import type { EngineInterface } from 'claude-code';
+export type StoreIO = {
+  fsRead: (path: string) => Promise<string>;
+  fsWrite: (path: string, text: string) => Promise<void>;
+  fsExists: (path: string) => Promise<boolean>;
+  storeGet: (key: string) => Promise<unknown>;
+  storeSet: (key: string, value: unknown) => Promise<void>;
+  storeKeys: () => Promise<string[]>;
+};
 
 export type FoldEntry = {
   id: string; stub: string; state: 'folded' | 'pinned';
@@ -15,41 +22,41 @@ const FOLD = (id: string) => `origami:fold:${id}`;
 const BODY = (id: string) => `.claude/origami/folds/${id}.md`;
 const LOG = '.claude/origami/origami.log';
 
-export async function newFoldId($: EngineInterface): Promise<string> {
-  const n = Number((await $.store.get(SEQ)) ?? 0) + 1;
-  await $.store.set(SEQ, n);
+export async function newFoldId(io: StoreIO): Promise<string> {
+  const n = Number((await io.storeGet(SEQ)) ?? 0) + 1;
+  await io.storeSet(SEQ, n);
   return `fold-${String(n).padStart(3, '0')}`;
 }
 
-export async function putFold($: EngineInterface, entry: FoldEntry, body: string): Promise<void> {
-  await $.fs.write(BODY(entry.id), body);
-  await $.store.set(FOLD(entry.id), entry);
+export async function putFold(io: StoreIO, entry: FoldEntry, body: string): Promise<void> {
+  await io.fsWrite(BODY(entry.id), body);
+  await io.storeSet(FOLD(entry.id), entry);
 }
 
-export async function getFold($: EngineInterface, id: string): Promise<{ entry: FoldEntry; body: string } | undefined> {
-  const entry = (await $.store.get(FOLD(id))) as FoldEntry | undefined;
+export async function getFold(io: StoreIO, id: string): Promise<{ entry: FoldEntry; body: string } | undefined> {
+  const entry = (await io.storeGet(FOLD(id))) as FoldEntry | undefined;
   if (!entry) return undefined;
-  const body = String(await $.fs.read(BODY(id)));
+  const body = String(await io.fsRead(BODY(id)));
   return { entry, body };
 }
 
-export async function setFold($: EngineInterface, entry: FoldEntry): Promise<void> {
-  await $.store.set(FOLD(entry.id), entry);
+export async function setFold(io: StoreIO, entry: FoldEntry): Promise<void> {
+  await io.storeSet(FOLD(entry.id), entry);
 }
 
-export async function allFolds($: EngineInterface): Promise<FoldEntry[]> {
-  const keys = (await $.store.keys()).filter((k: string) => k.startsWith('origami:fold:'));
+export async function allFolds(io: StoreIO): Promise<FoldEntry[]> {
+  const keys = (await io.storeKeys()).filter((k: string) => k.startsWith('origami:fold:'));
   const out: FoldEntry[] = [];
   for (const k of keys) {
-    const e = (await $.store.get(k)) as FoldEntry | undefined;
+    const e = (await io.storeGet(k)) as FoldEntry | undefined;
     if (e) out.push(e);
   }
   return out;
 }
 
-export async function appendLog($: EngineInterface, record: Record<string, unknown>): Promise<void> {
+export async function appendLog(io: StoreIO, record: Record<string, unknown>): Promise<void> {
   let prior = '';
-  try { if (await $.fs.exists(LOG)) prior = String(await $.fs.read(LOG)); } catch { prior = ''; }
+  try { if (await io.fsExists(LOG)) prior = String(await io.fsRead(LOG)); } catch { prior = ''; }
   const line = JSON.stringify({ ts: new Date().toISOString(), ...record });
-  await $.fs.write(LOG, prior === '' ? line + '\n' : prior + line + '\n');
+  await io.fsWrite(LOG, prior === '' ? line + '\n' : prior + line + '\n');
 }

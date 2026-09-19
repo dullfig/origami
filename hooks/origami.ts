@@ -1,7 +1,24 @@
 import type { Register, EngineInterface, SessionCompactInput, SessionCompactResult, SessionMessage } from 'claude-code';
 import { selectCandidates, rebuild, bannerText, stripBanner, applyBanner, type FoldDecision, type RestoreDecision, candidateMass, estimateTokens } from './rebuild';
-import { runLibrarian } from './librarian';
-import { newFoldId, putFold, getFold, setFold, allFolds, appendLog, inputKeyOf, type FoldEntry } from './store';
+import { runLibrarian, type CompleteFn } from './librarian';
+import { newFoldId, putFold, getFold, setFold, allFolds, appendLog, inputKeyOf, type FoldEntry, type StoreIO } from './store';
+
+// SAME-FILE closures over $: the engine validator follows $ only into functions
+// declared in this file, never across an import, so these adapters must live here
+// and be built at each hook call site before crossing into store.ts/librarian.ts.
+function storeIO($: EngineInterface): StoreIO {
+  return {
+    fsRead: async (path) => String(await $.fs.read(path)),
+    fsWrite: (path, text) => $.fs.write(path, text),
+    fsExists: (path) => $.fs.exists(path),
+    storeGet: (key) => $.store.get(key),
+    storeSet: (key, value) => $.store.set(key, value),
+    storeKeys: () => $.store.keys(),
+  };
+}
+function completeWith($: EngineInterface): CompleteFn {
+  return (req) => $.model.complete(req);
+}
 
 // Keep in sync with .claude-plugin/plugin.json's "version".
 export const ORIGAMI_VERSION = '1.0.0';
@@ -62,10 +79,11 @@ export async function runSweep(
   if (e.agentId) return undefined;                       // main thread only
   if (e.trigger === 'precompute') return undefined;      // out of scope v1
   try {
+    const io = storeIO($);
     // strip any existing banner pair first: all subsequent logic runs on the
     // stripped array, never on e.messages directly
     const messages = stripBanner(e.messages);
-    const folds = await allFolds($);
+    const folds = await allFolds(io);
     // pinned folds stay open: once restored inline their big results must never
     // become candidates again, so exclusion is by the toolUseId the entry recorded
     const excluded = new Set(folds.filter(f => f.state === 'pinned').map(f => f.toolUseId));
@@ -78,7 +96,7 @@ export async function runSweep(
       for (const m of messages) {
         for (const r of m.toolResults ?? []) {
           if (r.text.includes(`[origami ${f.id} `)) {
-            const stored = await getFold($, f.id);
+            const stored = await getFold(io, f.id);
             if (stored) restores.push({ toolUseId: r.tool_use_id, foldId: f.id, body: stored.body });
           }
         }
@@ -88,16 +106,16 @@ export async function runSweep(
       return e.trigger === 'plugin' ? { skip: 'origami: nothing to fold' } : undefined;
     }
     const lib = candidates.length > 0
-      ? await runLibrarian($, cfg.librarianModel, candidates, aggressive)
+      ? await runLibrarian(completeWith($), cfg.librarianModel, candidates, aggressive)
       : { decisions: [], inputTokens: 0, outputTokens: 0 };
     const foldDecisions: FoldDecision[] = [];
     for (const d of lib.decisions) {
       if (d.action !== 'fold') continue;
       const c = candidates.find(x => x.toolUseId === d.toolUseId)!;
-      const id = await newFoldId($);
+      const id = await newFoldId(io);
       const stub = d.stub.replaceAll('hydrate://FOLD#', `hydrate://${id}#`); // librarian writes the FOLD token; the real id lands here
       const entry: FoldEntry = { id, stub, state: 'folded', tool: c.tool, toolUseId: c.toolUseId, inputKey: inputKeyOf(c.input), originAge: c.ageTurns, sizeTokens: c.sizeTokens, hydrations: 0 };
-      await putFold($, entry, `# ${id} · ${c.tool} ${JSON.stringify(c.input)}\n\n${c.text}`);
+      await putFold(io, entry, `# ${id} · ${c.tool} ${JSON.stringify(c.input)}\n\n${c.text}`);
       foldDecisions.push({ toolUseId: d.toolUseId, foldId: id, stub });
     }
     const outcome = rebuild(messages, foldDecisions, restores, cfg, aggressive);
@@ -105,9 +123,9 @@ export async function runSweep(
       return e.trigger === 'plugin' ? { skip: `origami: reduction ${outcome.ratio.toFixed(2)} below threshold` } : undefined;
     }
     await $.store.set('origami:aggressive', false);
-    const activeFolds = (await allFolds($)).filter(f => f.state === 'folded').length;
+    const activeFolds = (await allFolds(io)).filter(f => f.state === 'folded').length;
     const finalMessages = applyBanner(outcome.messages, bannerText(ORIGAMI_VERSION, activeFolds));
-    await appendLog($, {
+    await appendLog(io, {
       event: 'sweep', trigger: e.trigger, aggressive,
       tokensBefore: outcome.tokensBefore, tokensAfter: outcome.tokensAfter,
       librarianInputTokens: lib.inputTokens, librarianOutputTokens: lib.outputTokens,
@@ -121,12 +139,13 @@ export async function runSweep(
 }
 
 export async function handleHydrate($: EngineInterface, cfg: OrigamiConfig, foldId: string, anchor?: string): Promise<string> {
-  const found = await getFold($, foldId);
+  const io = storeIO($);
+  const found = await getFold(io, foldId);
   if (!found) return `Unknown fold id "${foldId}". Fold ids look like fold-001 and appear in [origami fold-…] stubs in the conversation.`;
   const hydrations = found.entry.hydrations + 1;
   const pinned = hydrations >= cfg.pinAfterHydrations && found.entry.state !== 'pinned';
-  await setFold($, { ...found.entry, hydrations, state: pinned ? 'pinned' : found.entry.state });
-  await appendLog($, { event: 'hydrate', foldId, hydrations, originAge: found.entry.originAge, ...(anchor ? { anchor } : {}) });
+  await setFold(io, { ...found.entry, hydrations, state: pinned ? 'pinned' : found.entry.state });
+  await appendLog(io, { event: 'hydrate', foldId, hydrations, originAge: found.entry.originAge, ...(anchor ? { anchor } : {}) });
   const note = pinned
     ? `\n\n[origami: ${foldId} has now been hydrated ${hydrations}× and is pinned — it will be restored inline and stay open. Call unpin("${foldId}") if that stops being useful.]`
     : '';
@@ -134,10 +153,11 @@ export async function handleHydrate($: EngineInterface, cfg: OrigamiConfig, fold
 }
 
 export async function handleUnpin($: EngineInterface, foldId: string): Promise<string> {
-  const found = await getFold($, foldId);
+  const io = storeIO($);
+  const found = await getFold(io, foldId);
   if (!found) return `Unknown fold id "${foldId}".`;
-  await setFold($, { ...found.entry, state: 'folded', hydrations: 0 });
-  await appendLog($, { event: 'unpin', foldId });
+  await setFold(io, { ...found.entry, state: 'folded', hydrations: 0 });
+  await appendLog(io, { event: 'unpin', foldId });
   return `${foldId} unpinned: it is fold-eligible again and will refold on the next sweep.`;
 }
 
@@ -148,9 +168,10 @@ export async function observeMissedHydrate(
 ): Promise<void> {
   try {
     if (call.tool !== 'Read') return; // v1 watches the highest-signal case only
+    const io = storeIO($);
     const key = inputKeyOf(call.input);
-    const match = (await allFolds($)).find(f => f.state === 'folded' && f.tool === 'Read' && f.inputKey === key);
-    if (match) await appendLog($, { event: 'missed_hydrate', foldId: match.id, tool: call.tool, inputKey: key });
+    const match = (await allFolds(io)).find(f => f.state === 'folded' && f.tool === 'Read' && f.inputKey === key);
+    if (match) await appendLog(io, { event: 'missed_hydrate', foldId: match.id, tool: call.tool, inputKey: key });
   } catch { /* observation must never break a tool call */ }
 }
 

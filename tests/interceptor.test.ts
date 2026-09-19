@@ -30,7 +30,7 @@ test('sweep folds the stale result, persists the fold, logs the sweep', async ()
   expect(r.messages[1].text).toBe(BANNER_ACK);
   expect(r.messages[1].handle).toBe(undefined);
   expect(r.messages[4].toolResults![0].text.includes('fold-001')).toBe(true);
-  const stored = await getFold(fake.$, 'fold-001');
+  const stored = await getFold(fake.io, 'fold-001');
   expect(stored!.body.includes('CONTENT')).toBe(true);
   const log = String(await fake.$.fs.read('.claude/origami/origami.log'));
   expect(log.includes('"event":"sweep"')).toBe(true);
