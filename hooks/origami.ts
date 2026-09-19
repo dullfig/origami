@@ -1,7 +1,7 @@
 import type { Register, EngineInterface, SessionCompactInput, SessionCompactResult, SessionMessage } from 'claude-code';
 import { selectCandidates, rebuild, bannerText, stripBanner, applyBanner, type FoldDecision, type RestoreDecision, candidateMass, estimateTokens } from './rebuild';
 import { runLibrarian } from './librarian';
-import { newFoldId, putFold, getFold, allFolds, appendLog, inputKeyOf, type FoldEntry } from './store';
+import { newFoldId, putFold, getFold, setFold, allFolds, appendLog, inputKeyOf, type FoldEntry } from './store';
 
 // Keep in sync with .claude-plugin/plugin.json's "version".
 export const ORIGAMI_VERSION = '1.0.0';
@@ -120,6 +120,40 @@ export async function runSweep(
   }
 }
 
+export async function handleHydrate($: EngineInterface, cfg: OrigamiConfig, foldId: string, anchor?: string): Promise<string> {
+  const found = await getFold($, foldId);
+  if (!found) return `Unknown fold id "${foldId}". Fold ids look like fold-001 and appear in [origami fold-…] stubs in the conversation.`;
+  const hydrations = found.entry.hydrations + 1;
+  const pinned = hydrations >= cfg.pinAfterHydrations && found.entry.state !== 'pinned';
+  await setFold($, { ...found.entry, hydrations, state: pinned ? 'pinned' : found.entry.state });
+  await appendLog($, { event: 'hydrate', foldId, hydrations, originAge: found.entry.originAge, ...(anchor ? { anchor } : {}) });
+  const note = pinned
+    ? `\n\n[origami: ${foldId} has now been hydrated ${hydrations}× and is pinned — it will be restored inline and stay open. Call unpin("${foldId}") if that stops being useful.]`
+    : '';
+  return found.body + note;
+}
+
+export async function handleUnpin($: EngineInterface, foldId: string): Promise<string> {
+  const found = await getFold($, foldId);
+  if (!found) return `Unknown fold id "${foldId}".`;
+  await setFold($, { ...found.entry, state: 'folded', hydrations: 0 });
+  await appendLog($, { event: 'unpin', foldId });
+  return `${foldId} unpinned: it is fold-eligible again and will refold on the next sweep.`;
+}
+
+// The degradation health metric (spec addendum): a tool call whose target matches
+// a live fold means the model re-ran a tool instead of hydrating. Observe-only.
+export async function observeMissedHydrate(
+  $: EngineInterface, call: { tool: string; input: Record<string, unknown> },
+): Promise<void> {
+  try {
+    if (call.tool !== 'Read') return; // v1 watches the highest-signal case only
+    const key = inputKeyOf(call.input);
+    const match = (await allFolds($)).find(f => f.state === 'folded' && f.tool === 'Read' && f.inputKey === key);
+    if (match) await appendLog($, { event: 'missed_hydrate', foldId: match.id, tool: call.tool, inputKey: key });
+  } catch { /* observation must never break a tool call */ }
+}
+
 export const register: Register = (on, options) => {
   const config = readConfig(options);
   let sweeping = false;
@@ -144,5 +178,39 @@ export const register: Register = (on, options) => {
   on('session.compact', async ($, e, next) => {
     const result = await runSweep($, config, e);
     return result ?? next(e);
+  });
+  on('session.start', async ($, e, next) => {
+    await $.tool.register({
+      name: 'hydrate',
+      description: 'Expand an origami fold to its full stored content. Use before re-running a tool whose result was folded — re-running may not reproduce it (files change, tests flake). fold_id appears in [origami fold-…] stubs and in hydrate:// links; when a specific link motivated this call, pass its #fragment as anchor.',
+      inputSchema: { type: 'object', properties: { fold_id: { type: 'string' }, anchor: { type: 'string' } }, required: ['fold_id'] },
+    });
+    await $.tool.register({
+      name: 'unpin',
+      description: 'Release a pinned origami fold so it can fold again. Use when pinned content is no longer earning its place in context.',
+      inputSchema: { type: 'object', properties: { fold_id: { type: 'string' } }, required: ['fold_id'] },
+    });
+    return next(e);
+  });
+  // Serve the two declared tools: a tool.call hook must answer with `{ result }`
+  // (core sets `text` for the model from it; a hook's own `{ text }` is not read —
+  // see ToolCallResult in types/claude-code.d.ts). Both tools' arguments ride
+  // flat on `e` (McpToolCallInputFallback's `[argument: string]: unknown`), not
+  // nested under an `input` key.
+  on('tool.call', { tool: 'mcp__origami__hydrate' }, async ($, e) => {
+    const input = e as unknown as { fold_id?: unknown; anchor?: unknown };
+    return { result: await handleHydrate($, config, String(input.fold_id ?? ''), typeof input.anchor === 'string' ? input.anchor : undefined) };
+  });
+  on('tool.call', { tool: 'mcp__origami__unpin' }, async ($, e) => {
+    const input = e as unknown as { fold_id?: unknown };
+    return { result: await handleUnpin($, String(input.fold_id ?? '')) };
+  });
+  on('tool.call', async ($, e, next) => {
+    // observe-only middleware: never blocks, never rewrites; main thread only
+    const call = e as unknown as { tool: string; agentId?: string; [k: string]: unknown };
+    if (!call.agentId && call.tool === 'Read') {
+      await observeMissedHydrate($, { tool: call.tool, input: call as unknown as Record<string, unknown> });
+    }
+    return next(e);
   });
 };
