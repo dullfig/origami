@@ -1,5 +1,5 @@
-import type { Register, EngineInterface, SessionCompactInput, SessionCompactResult } from 'claude-code';
-import { selectCandidates, rebuild, bannerText, stripBanner, applyBanner, type FoldDecision, type RestoreDecision } from './rebuild';
+import type { Register, EngineInterface, SessionCompactInput, SessionCompactResult, SessionMessage } from 'claude-code';
+import { selectCandidates, rebuild, bannerText, stripBanner, applyBanner, type FoldDecision, type RestoreDecision, candidateMass, estimateTokens } from './rebuild';
 import { runLibrarian } from './librarian';
 import { newFoldId, putFold, getFold, allFolds, appendLog, inputKeyOf, type FoldEntry } from './store';
 
@@ -39,6 +39,20 @@ export function readConfig(options: unknown): OrigamiConfig {
     pinAfterHydrations: num('pinAfterHydrations'),
     librarianModel: typeof o.librarianModel === 'string' ? o.librarianModel : DEFAULTS.librarianModel,
   };
+}
+
+export async function shouldSweep(
+  $: EngineInterface, cfg: OrigamiConfig, messagesArg?: readonly SessionMessage[],
+): Promise<{ sweep: boolean; aggressive: boolean }> {
+  const messages = messagesArg ?? await $.session.messages();
+  const liveTokens = messages.reduce((s, m) => s + estimateTokens(m.text)
+    + (m.toolResults ?? []).reduce((a, r) => a + estimateTokens(r.text), 0), 0);
+  const aggressive = liveTokens > cfg.workingSetBudget;
+  const mass = candidateMass(
+    selectCandidates(messages, new Set<string>(), cfg, aggressive)
+      .filter(c => !c.text.startsWith('[origami fold-')),
+  );
+  return { sweep: mass >= cfg.minFoldMass || (aggressive && mass > 0), aggressive };
 }
 
 // returns a result to answer with, or undefined = caller must pass through via next(e)
@@ -108,6 +122,25 @@ export async function runSweep(
 
 export const register: Register = (on, options) => {
   const config = readConfig(options);
+  let sweeping = false;
+  on('turn.complete', async ($, e, next) => {
+    if ((e as { agentId?: string }).agentId) return next(e);   // main thread only
+    if (!sweeping) {
+      try {
+        const d = await shouldSweep($, config);
+        if (d.sweep) {
+          sweeping = true;
+          await $.store.set('origami:aggressive', d.aggressive);
+          await $.session.compact();          // rejects while a turn runs → caught below
+        }
+      } catch (err) {
+        $.ui.log(`origami trigger skipped: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        sweeping = false;
+      }
+    }
+    return next(e);
+  });
   on('session.compact', async ($, e, next) => {
     const result = await runSweep($, config, e);
     return result ?? next(e);
