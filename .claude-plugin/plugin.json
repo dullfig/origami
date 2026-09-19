@@ -1,11 +1,14 @@
 {
   "name": "origami",
+  "description": "Variable-resolution context: folds bulky stale tool output to disk behind always-visible stubs; hydrate() recovers detail on demand.",
   "version": "1.0.0",
-  "description": "Origami - context folding for Claude Code. Keeps full conversation history at variable resolution instead of lossy compaction.",
-  "license": "MIT",
-  "author": { "name": "dullfig" },
-  "homepage": "https://github.com/dullfig/origami",
-  "hooks": "./hooks/hooks.json",
-  "skills": ["./skills/context-folding"],
-  "commands": ["./commands"]
+  "userConfig": {
+    "foldAgeTurns": { "type": "number", "default": 3, "description": "Results younger than this many turns are never fold candidates" },
+    "minFoldMass": { "type": "number", "default": 20000, "description": "Candidate token mass that triggers a sweep" },
+    "workingSetBudget": { "type": "number", "default": 100000, "description": "Absolute live-context tokens; above it sweeps turn aggressive" },
+    "preserveRecentTurns": { "type": "number", "default": 3, "description": "Turns the rebuilder never touches" },
+    "minReductionRatio": { "type": "number", "default": 0.15, "description": "Below this estimated reduction a sweep is skipped" },
+    "pinAfterHydrations": { "type": "number", "default": 2, "description": "Hydration count at which a fold is pinned open" },
+    "librarianModel": { "type": "string", "default": "haiku", "description": "Model alias for the librarian" }
+  }
 }
