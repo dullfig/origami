@@ -71,6 +71,21 @@ export function stubText(foldId: string, tool: string, stub: string): string {
   return `[origami ${foldId} · ${tool} result folded] ${stub} — call hydrate("${foldId}") for the full content.`;
 }
 
+// Every fold id whose stub actually appears in the transcript (message text or a tool
+// result). Used to reconcile the fold index: an entry in state 'folded' whose stub is
+// gone no longer exists as far as the conversation is concerned.
+export function foldIdsPresent(messages: readonly SessionMessage[]): Set<string> {
+  const out = new Set<string>();
+  const scan = (text: string) => {
+    for (const m of text.matchAll(/\[origami (fold-\d+)[\s·]/g)) out.add(m[1]);
+  };
+  for (const m of messages) {
+    scan(m.text);
+    for (const r of m.toolResults ?? []) scan(r.text);
+  }
+  return out;
+}
+
 export type RebuildOutcome =
   | { kind: 'rebuilt'; messages: SessionMessage[]; tokensBefore: number; tokensAfter: number }
   | { kind: 'insufficient'; ratio: number };

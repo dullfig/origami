@@ -1,19 +1,43 @@
 import type { Register, EngineInterface, SessionCompactInput, SessionCompactResult, SessionMessage } from 'claude-code';
-import { selectCandidates, rebuild, bannerText, stripBanner, applyBanner, type FoldDecision, type RestoreDecision, candidateMass, estimateTokens } from './rebuild';
+import { selectCandidates, rebuild, bannerText, stripBanner, applyBanner, foldIdsPresent, type FoldDecision, type RestoreDecision, candidateMass, estimateTokens } from './rebuild';
 import { runLibrarian, type CompleteFn } from './librarian';
 import { newFoldId, putFold, getFold, setFold, allFolds, appendLog, inputKeyOf, type FoldEntry, type StoreIO } from './store';
+
+// $.store is PLUGIN-GLOBAL: one JSON file under the user's Claude Code config dir
+// (types/claude-code.d.ts ~:2823-2830), shared by every project this plugin runs in.
+// $.fs relative paths are NOT — they resolve under the session's working directory
+// (~:2700-2702), so fold BODIES are already project-local while the index would leak.
+// $.session.root() (~:2364-2369, "the session's project root, absolute") is the stable
+// per-project discriminator; a short hash of it prefixes every store key.
+function projectHash(root: string): string {
+  let h = 0x811c9dc5;                                   // FNV-1a, 32-bit
+  for (let i = 0; i < root.length; i++) {
+    h ^= root.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(36);
+}
 
 // SAME-FILE closures over $: the engine validator follows $ only into functions
 // declared in this file, never across an import, so these adapters must live here
 // and be built at each hook call site before crossing into store.ts/librarian.ts.
-function storeIO($: EngineInterface): StoreIO {
+// The project prefix is baked INTO the closures, so store.ts never sees it: keys go
+// in prefixed and come back out of storeKeys() stripped, keeping the `origami:fold:`
+// filtering in store.ts unchanged.
+export async function storeIO($: EngineInterface): Promise<StoreIO> {
+  let prefix = 'origami@0/';
+  try {
+    const root = await $.session.root();
+    if (typeof root === 'string' && root !== '') prefix = `origami@${projectHash(root)}/`;
+  } catch { /* a host without session.root keeps the single shared namespace */ }
   return {
     fsRead: async (path) => String(await $.fs.read(path)),
     fsWrite: (path, text) => $.fs.write(path, text),
     fsExists: (path) => $.fs.exists(path),
-    storeGet: (key) => $.store.get(key),
-    storeSet: (key, value) => $.store.set(key, value),
-    storeKeys: () => $.store.keys(),
+    storeGet: (key) => $.store.get(prefix + key),
+    storeSet: (key, value) => $.store.set(prefix + key, value),
+    storeKeys: async () => (await $.store.keys())
+      .filter(k => k.startsWith(prefix)).map(k => k.slice(prefix.length)),
   };
 }
 function completeWith($: EngineInterface): CompleteFn {
@@ -58,18 +82,33 @@ export function readConfig(options: unknown): OrigamiConfig {
   };
 }
 
+// A sweep that ends in a skip (reduction below threshold, librarian kept everything)
+// records the candidate mass it skipped on. The trigger then stays quiet until the
+// mass has meaningfully grown, so the same fruitless librarian call cannot repeat
+// every turn forever. Cleared on any successful sweep.
+const LAST_SKIP_MASS = 'origami:lastSkipMass';
+const SKIP_COOLDOWN_FACTOR = 1.2;
+const AGGRESSIVE = 'origami:aggressive';
+
 export async function shouldSweep(
   $: EngineInterface, cfg: OrigamiConfig, messagesArg?: readonly SessionMessage[],
 ): Promise<{ sweep: boolean; aggressive: boolean }> {
+  const io = await storeIO($);
   const messages = messagesArg ?? await $.session.messages();
   const liveTokens = messages.reduce((s, m) => s + estimateTokens(m.text)
     + (m.toolResults ?? []).reduce((a, r) => a + estimateTokens(r.text), 0), 0);
   const aggressive = liveTokens > cfg.workingSetBudget;
+  // the same exclusion runSweep applies: a pinned fold's restored body is never a
+  // candidate there, so counting its mass here would re-trigger compaction every turn
+  const excluded = new Set((await allFolds(io)).filter(f => f.state === 'pinned').map(f => f.toolUseId));
   const mass = candidateMass(
-    selectCandidates(messages, new Set<string>(), cfg, aggressive)
+    selectCandidates(messages, excluded, cfg, aggressive)
       .filter(c => !c.text.startsWith('[origami fold-')),
   );
-  return { sweep: mass >= cfg.minFoldMass || (aggressive && mass > 0), aggressive };
+  const triggered = mass >= cfg.minFoldMass || (aggressive && mass > 0);
+  const lastSkipMass = Number((await io.storeGet(LAST_SKIP_MASS)) ?? 0);
+  const cooled = !(lastSkipMass > 0) || mass > lastSkipMass * SKIP_COOLDOWN_FACTOR;
+  return { sweep: triggered && cooled, aggressive };
 }
 
 // returns a result to answer with, or undefined = caller must pass through via next(e)
@@ -79,15 +118,24 @@ export async function runSweep(
   if (e.agentId) return undefined;                       // main thread only
   if (e.trigger === 'precompute') return undefined;      // out of scope v1
   try {
-    const io = storeIO($);
+    const io = await storeIO($);
     // strip any existing banner pair first: all subsequent logic runs on the
     // stripped array, never on e.messages directly
     const messages = stripBanner(e.messages);
+    // --- lifecycle reconcile: a 'folded' entry whose stub no longer appears anywhere
+    // in the transcript is dead (unpin->refold replaced it, the stub was edited away,
+    // the turn was rewound). Left alone it inflates the banner count forever and feeds
+    // missed_hydrate false positives. Entries created BY this sweep are not yet in the
+    // store, so reconciling here — before any creation — can never evict them.
+    const stubIds = foldIdsPresent(messages);
+    for (const f of await allFolds(io)) {
+      if (f.state === 'folded' && !stubIds.has(f.id)) await setFold(io, { ...f, state: 'evicted' });
+    }
     const folds = await allFolds(io);
     // pinned folds stay open: once restored inline their big results must never
     // become candidates again, so exclusion is by the toolUseId the entry recorded
     const excluded = new Set(folds.filter(f => f.state === 'pinned').map(f => f.toolUseId));
-    const aggressive = Boolean(await $.store.get('origami:aggressive'));
+    const aggressive = Boolean(await io.storeGet(AGGRESSIVE));
     const candidates = selectCandidates(messages, excluded, cfg, aggressive)
       .filter(c => !c.text.startsWith('[origami fold-'));  // never re-fold a stub
     // reopen pinned folds whose stubs still sit in history
@@ -108,21 +156,35 @@ export async function runSweep(
     const lib = candidates.length > 0
       ? await runLibrarian(completeWith($), cfg.librarianModel, candidates, aggressive)
       : { decisions: [], inputTokens: 0, outputTokens: 0 };
+    // Ids are allocated and bodies BUFFERED here; nothing is persisted until rebuild
+    // has cleared the reduction gate. Persisting first left orphan entries + body
+    // files behind on every skipped sweep, inflating the banner count and feeding
+    // missed_hydrate false positives.
     const foldDecisions: FoldDecision[] = [];
+    const pending: { entry: FoldEntry; body: string; header: string }[] = [];
     for (const d of lib.decisions) {
       if (d.action !== 'fold') continue;
       const c = candidates.find(x => x.toolUseId === d.toolUseId)!;
       const id = await newFoldId(io);
       const stub = d.stub.replaceAll('hydrate://FOLD#', `hydrate://${id}#`); // librarian writes the FOLD token; the real id lands here
       const entry: FoldEntry = { id, stub, state: 'folded', tool: c.tool, toolUseId: c.toolUseId, inputKey: inputKeyOf(c.input), originAge: c.ageTurns, sizeTokens: c.sizeTokens, hydrations: 0 };
-      await putFold(io, entry, `# ${id} · ${c.tool} ${JSON.stringify(c.input)}\n\n${c.text}`);
+      // body is c.text VERBATIM; the header rides in its own slot so restores are
+      // byte-exact and refolding a restored body cannot nest a second header
+      pending.push({ entry, body: c.text, header: `# ${id} · ${c.tool} ${JSON.stringify(c.input)}` });
       foldDecisions.push({ toolUseId: d.toolUseId, foldId: id, stub });
+    }
+    if (foldDecisions.length === 0 && restores.length === 0) {
+      await io.storeSet(LAST_SKIP_MASS, candidateMass(candidates));
+      return e.trigger === 'plugin' ? { skip: 'origami: librarian kept everything' } : undefined;
     }
     const outcome = rebuild(messages, foldDecisions, restores, cfg, aggressive);
     if (outcome.kind === 'insufficient') {
+      await io.storeSet(LAST_SKIP_MASS, candidateMass(candidates));
       return e.trigger === 'plugin' ? { skip: `origami: reduction ${outcome.ratio.toFixed(2)} below threshold` } : undefined;
     }
-    await $.store.set('origami:aggressive', false);
+    for (const p of pending) await putFold(io, p.entry, p.body, p.header);
+    await io.storeSet(LAST_SKIP_MASS, 0);
+    await io.storeSet(AGGRESSIVE, false);
     const activeFolds = (await allFolds(io)).filter(f => f.state === 'folded').length;
     const finalMessages = applyBanner(outcome.messages, bannerText(ORIGAMI_VERSION, activeFolds));
     await appendLog(io, {
@@ -138,27 +200,40 @@ export async function runSweep(
   }
 }
 
+// A tool.call hook must ANSWER, never throw: a throw escapes the tool and takes the
+// turn with it. Both handlers are therefore total — every failure path (missing body
+// file, store or fs refusal) comes back as instructive text the model can act on.
 export async function handleHydrate($: EngineInterface, cfg: OrigamiConfig, foldId: string, anchor?: string): Promise<string> {
-  const io = storeIO($);
-  const found = await getFold(io, foldId);
-  if (!found) return `Unknown fold id "${foldId}". Fold ids look like fold-001 and appear in [origami fold-…] stubs in the conversation.`;
-  const hydrations = found.entry.hydrations + 1;
-  const pinned = hydrations >= cfg.pinAfterHydrations && found.entry.state !== 'pinned';
-  await setFold(io, { ...found.entry, hydrations, state: pinned ? 'pinned' : found.entry.state });
-  await appendLog(io, { event: 'hydrate', foldId, hydrations, originAge: found.entry.originAge, ...(anchor ? { anchor } : {}) });
-  const note = pinned
-    ? `\n\n[origami: ${foldId} has now been hydrated ${hydrations}× and is pinned — it will be restored inline and stay open. Call unpin("${foldId}") if that stops being useful.]`
-    : '';
-  return found.body + note;
+  try {
+    const io = await storeIO($);
+    const found = await getFold(io, foldId);
+    if (!found) return `Unknown fold id "${foldId}". Fold ids look like fold-001 and appear in [origami fold-…] stubs in the conversation.`;
+    const hydrations = found.entry.hydrations + 1;
+    const pinned = hydrations >= cfg.pinAfterHydrations && found.entry.state === 'folded';
+    await setFold(io, { ...found.entry, hydrations, state: pinned ? 'pinned' : found.entry.state });
+    await appendLog(io, { event: 'hydrate', foldId, hydrations, originAge: found.entry.originAge, ...(anchor ? { anchor } : {}) });
+    const note = pinned
+      ? `\n\n[origami: ${foldId} has now been hydrated ${hydrations}× and is pinned — it will be restored inline and stay open. Call unpin("${foldId}") if that stops being useful.]`
+      : found.entry.state === 'evicted'
+        ? `\n\n[origami: ${foldId} is evicted — its stub is no longer in the conversation, so it will not be restored inline. The content above is still the full stored body.]`
+        : '';
+    return (found.header ? found.header + '\n\n' : '') + found.body + note;
+  } catch (err) {
+    return `origami could not hydrate "${foldId}": ${err instanceof Error ? err.message : String(err)}. The stored body may have been removed; re-run the original tool if you need the content.`;
+  }
 }
 
 export async function handleUnpin($: EngineInterface, foldId: string): Promise<string> {
-  const io = storeIO($);
-  const found = await getFold(io, foldId);
-  if (!found) return `Unknown fold id "${foldId}".`;
-  await setFold(io, { ...found.entry, state: 'folded', hydrations: 0 });
-  await appendLog(io, { event: 'unpin', foldId });
-  return `${foldId} unpinned: it is fold-eligible again and will refold on the next sweep.`;
+  try {
+    const io = await storeIO($);
+    const found = await getFold(io, foldId);
+    if (!found) return `Unknown fold id "${foldId}".`;
+    await setFold(io, { ...found.entry, state: 'folded', hydrations: 0 });
+    await appendLog(io, { event: 'unpin', foldId });
+    return `${foldId} unpinned: it is fold-eligible again and will refold on the next sweep.`;
+  } catch (err) {
+    return `origami could not unpin "${foldId}": ${err instanceof Error ? err.message : String(err)}.`;
+  }
 }
 
 // The degradation health metric (spec addendum): a tool call whose target matches
@@ -168,7 +243,7 @@ export async function observeMissedHydrate(
 ): Promise<void> {
   try {
     if (call.tool !== 'Read') return; // v1 watches the highest-signal case only
-    const io = storeIO($);
+    const io = await storeIO($);
     const key = inputKeyOf(call.input);
     const match = (await allFolds(io)).find(f => f.state === 'folded' && f.tool === 'Read' && f.inputKey === key);
     if (match) await appendLog(io, { event: 'missed_hydrate', foldId: match.id, tool: call.tool, inputKey: key });
@@ -185,7 +260,7 @@ export const register: Register = (on, options) => {
         const d = await shouldSweep($, config);
         if (d.sweep) {
           sweeping = true;
-          await $.store.set('origami:aggressive', d.aggressive);
+          await (await storeIO($)).storeSet(AGGRESSIVE, d.aggressive);
           await $.session.compact();          // rejects while a turn runs → caught below
         }
       } catch (err) {

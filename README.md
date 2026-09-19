@@ -13,7 +13,8 @@ percentage — behavior is identical whether the window is 200k or 1M tokens.
 ## How It Works
 
 ```
-turn ends ──► turn.complete: stale unpinned tool-result mass ≥ minFoldMass?
+turn ends ──► turn.complete: stale unpinned tool-result mass ≥ minFoldMass,
+                        │            and grown ≥ 20% past the last skip?
                         │ no → nothing (window fill is irrelevant)
                         │ yes
                         ▼
@@ -26,10 +27,12 @@ turn ends ──► turn.complete: stale unpinned tool-result mass ≥ minFoldMa
               Librarian (Haiku, full content visible)
                         │  keep / fold + stub per candidate
                         ▼
-              Store: bodies → $.fs, index → $.store
-                        ▼
               Rebuilder → { messages }   (verbatim text + stubs, pairs intact)
                         │  any failure anywhere → next(event) or {skip}
+                        ▼
+              Store: bodies → $.fs, index → $.store
+                        │  ONLY once the reduction gate has passed — a skipped
+                        │  sweep persists nothing and records its skip mass
                         ▼
               conversation continues ──► model calls hydrate(fold-012)
                                               │  full content at tail; count++;
@@ -92,7 +95,7 @@ plugin configuration UI):
 | `minFoldMass` | 20000 | Candidate token mass that triggers a sweep |
 | `workingSetBudget` | 100000 | Absolute live-context tokens; above it, sweeps turn aggressive |
 | `preserveRecentTurns` | 3 | Turns the rebuilder never touches |
-| `minReductionRatio` | 0.15 | Below this, a sweep is skipped |
+| `minReductionRatio` | 0.15 | Below this, a sweep is skipped (and the trigger goes quiet until the candidate mass grows 20% past what it skipped on, so a skip cannot livelock into a librarian call every turn) |
 | `pinAfterHydrations` | 2 | Hysteresis threshold |
 | `librarianModel` | `haiku` | Passed to `$.model.complete` |
 
@@ -129,15 +132,33 @@ All Origami state lives under `.claude/origami/` in the project:
 ```
 .claude/origami/
 ├── folds/
-│   ├── fold-001.md      # exact folded content, plus a small header
+│   ├── fold-001.md      # a small header, a delimiter, then the exact bytes
 │   ├── fold-002.md
 │   └── ...
 └── origami.log           # append-only JSONL: sweep, hydrate, and unpin records
 ```
 
+A fold body file is `# <id> · <tool> <input>`, the delimiter line
+`<<<origami:body>>>`, and then the original tool result **verbatim**. The
+header lives on the far side of the delimiter so a restore puts back the
+exact bytes and an unpin → refold cycle cannot nest a second header.
+
 The fold index itself (id, stub, state, origin turn, size estimate,
 hydration count) lives in `$.store`, not on disk as a separate file. Both
 `$.fs` and `$.store` persist across `--resume` and process restarts.
+
+`$.store` is **plugin-global** — one JSON file under the user's Claude Code
+configuration directory, shared by every project this plugin runs in —
+while `$.fs` relative paths resolve under the session's working directory.
+Origami therefore prefixes every store key with `origami@<hash>/`, where the
+hash is a short FNV-1a of `await $.session.root()`, so one project's fold
+index, sequence counter and flags never reach another's.
+
+A fold entry is `folded`, `pinned` or `evicted`. Each sweep reconciles the
+index against reality: a `folded` entry whose stub no longer appears
+anywhere in the transcript becomes `evicted` — it stops counting toward the
+banner, stops matching the missed-hydrate observer, and is never restored.
+Its body stays on disk, so `hydrate` still serves it and says so.
 
 ## The status banner
 
