@@ -68,3 +68,22 @@ test('a pinned fold restored inline does not re-trigger the sweep', async () => 
   // runSweep would exclude t1 and find nothing to fold; the trigger must agree
   expect((await shouldSweep($, cfg, t)).sweep).toBe(false);
 });
+
+// --- F2: a raw (uncompacted) transcript view must not re-trigger a sweep for
+// mass that is already folded, even though the fold's original toolUseId still
+// carries its full, un-stubbed text in that raw view (observed in resumed
+// headless sessions: $.session.messages() can return the pre-compaction transcript).
+
+test('a folded (non-pinned) entry excludes its toolUseId even when messages() still shows the raw result', async () => {
+  const { $ } = fakeEngine();
+  const io = await storeIO($);
+  const t = heavyTranscript(100000);                            // t1 is the only mass, RAW (unfolded) here
+  expect((await shouldSweep($, cfg, t)).sweep).toBe(true);      // baseline: empty store still triggers
+  await putFold(io, {
+    id: 'fold-001', stub: 's', state: 'folded', tool: 'Read', toolUseId: 't1',
+    inputKey: 'a.ts', originAge: 3, sizeTokens: 25000, hydrations: 0,
+  }, 'BODY');
+  // t1 already has a live 'folded' entry; its mass must be excluded regardless of
+  // whether the transcript view handed to shouldSweep still shows the raw result
+  expect((await shouldSweep($, cfg, t)).sweep).toBe(false);
+});

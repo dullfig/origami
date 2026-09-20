@@ -98,9 +98,9 @@ export async function shouldSweep(
   const liveTokens = messages.reduce((s, m) => s + estimateTokens(m.text)
     + (m.toolResults ?? []).reduce((a, r) => a + estimateTokens(r.text), 0), 0);
   const aggressive = liveTokens > cfg.workingSetBudget;
-  // the same exclusion runSweep applies: a pinned fold's restored body is never a
-  // candidate there, so counting its mass here would re-trigger compaction every turn
-  const excluded = new Set((await allFolds(io)).filter(f => f.state === 'pinned').map(f => f.toolUseId));
+  // every live fold's original result is already folded (or pinned open) — its mass
+  // must never re-trigger a sweep, whichever transcript view messages() returns
+  const excluded = new Set((await allFolds(io)).filter(f => f.state !== 'evicted').map(f => f.toolUseId));
   const mass = candidateMass(
     selectCandidates(messages, excluded, cfg, aggressive)
       .filter(c => !c.text.startsWith('[origami fold-')),
