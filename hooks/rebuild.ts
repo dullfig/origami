@@ -86,6 +86,28 @@ export function foldIdsPresent(messages: readonly SessionMessage[]): Set<string>
   return out;
 }
 
+// --- Fold-index insurance (spec addendum F10, `auto` row) ---
+// When origami cannot reduce an `auto` compaction, the stock summarizer runs and
+// would otherwise wipe every stub. This handle-less user message is appended to
+// the event handed to next(), so the summarizer's input carries an explicit,
+// list-shaped inventory of the live folds to preserve the recovery links from.
+// Pure: takes store entries, returns undefined when no fold is live.
+export function foldIndexMessage(folds: readonly FoldIndexEntry[]): SessionMessage | undefined {
+  const live = folds.filter(f => f.state === 'folded' || f.state === 'pinned');
+  if (live.length === 0) return undefined;
+  const lines = live.map(f => `${f.id} — ${f.stub}`).join('\n');
+  return {
+    role: 'user',
+    text: `[origami fold index — preserve these recovery links in any summary]\n${lines}`,
+    toolUses: [],
+    // no handle: synthetic
+  };
+}
+
+// The shape foldIndexMessage needs of a store entry (structurally satisfied by
+// store.ts's FoldEntry; declared here so rebuild.ts stays dependency-free).
+export type FoldIndexEntry = { id: string; stub: string; state: 'folded' | 'pinned' | 'evicted' };
+
 export type RebuildOutcome =
   | { kind: 'rebuilt'; messages: SessionMessage[]; tokensBefore: number; tokensAfter: number }
   | { kind: 'insufficient'; ratio: number };
@@ -158,7 +180,10 @@ content. The full content is intact on disk — nothing is lost.
 - BETA DUTY: if you notice a reference to content you cannot locate, a
   stub that contradicts your memory, or anything that feels like a gap —
   SAY SO TO THE USER explicitly. You are a test pilot; anomalies are data.
-Currently ${activeFolds} folds active.]`;
+- Statements you made before a fold were made with the full content in
+  view; your own earlier messages are your record of what you saw.
+  Distrust only claims sourced from a stub alone.
+Currently ${activeFolds} folds active. (This notice is updated in place at each sweep.)]`;
 }
 
 export const BANNER_ACK = "Understood — I'll follow hydrate:// links before re-running tools or claiming I never saw something, and I'll flag anomalies to the user. [synthetic acknowledgment inserted by origami]";

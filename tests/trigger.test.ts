@@ -87,3 +87,21 @@ test('a folded (non-pinned) entry excludes its toolUseId even when messages() st
   // whether the transcript view handed to shouldSweep still shows the raw result
   expect((await shouldSweep($, cfg, t)).sweep).toBe(false);
 });
+
+// --- F11: aggressive mode must not engage on mass that is already folded ---
+
+test('a live folds toolUseId is discounted from liveTokens, so aggressive stays false', async () => {
+  const { $ } = fakeEngine();
+  const io = await storeIO($);
+  const t = heavyTranscript(500000);                            // ~125k tokens > 100k budget
+  expect((await shouldSweep($, cfg, t)).aggressive).toBe(true); // baseline: empty store
+  await putFold(io, {
+    id: 'fold-001', stub: 's', state: 'folded', tool: 'Read', toolUseId: 't1',
+    inputKey: 'a.ts', originAge: 3, sizeTokens: 125000, hydrations: 0,
+  }, 'BODY');
+  // that mass is on disk already; a raw transcript view must not push the working
+  // set over budget a second time
+  const d = await shouldSweep($, cfg, t);
+  expect(d.aggressive).toBe(false);
+  expect(d.sweep).toBe(false);
+});

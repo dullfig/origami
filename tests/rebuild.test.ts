@@ -84,6 +84,11 @@ test('bannerText contains required elements and starts with BANNER_PREFIX', asyn
   expect(b).toContain('Currently 3 folds active.');
   expect(b).toContain('hydrate');
   expect(b).toContain('BETA DUTY');
+  // F8: the model's own earlier messages are trustworthy; only stub-sourced claims are not
+  expect(b).toContain('your own earlier messages are your record of what you saw');
+  expect(b).toContain('Distrust only claims sourced from a stub alone.');
+  // F8: the banner is rewritten every sweep, not a stale one-off
+  expect(b).toContain('(This notice is updated in place at each sweep.)');
 });
 
 test('applyBanner prepends a handle-less user+assistant pair', async () => {

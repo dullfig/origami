@@ -15,6 +15,10 @@ test('hydrate returns body, counts, pins at threshold, logs', async (_kit, on) =
   expect((await getFold(io, 'fold-001'))!.entry.hydrations).toBe(1);
   const second = await handleHydrate($, cfg, 'fold-001');
   expect(second.includes('pinned')).toBe(true);               // tells the model it is now pinned
+  // F9: the notice rides at BOTH ends, so a head-truncated preview still carries it
+  expect(second.startsWith('[origami: fold-001')).toBe(true);
+  expect(second.indexOf('pinned') < second.indexOf('THE FULL BODY')).toBe(true);
+  expect(second.lastIndexOf('pinned') > second.indexOf('THE FULL BODY')).toBe(true);
   expect((await getFold(io, 'fold-001'))!.entry.state).toBe('pinned');
   const log = String(await $.fs.read('.claude/origami/origami.log'));
   expect(log.split('\n').filter(l => l.includes('"event":"hydrate"')).length).toBe(2);

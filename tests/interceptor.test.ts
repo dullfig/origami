@@ -2,7 +2,7 @@ import { test, expect } from 'claude-code/testing';
 import { runSweep, storeIO, handleHydrate, observeMissedHydrate } from '../hooks/origami';
 import { readConfig } from '../hooks/origami';
 import { getFold, allFolds, putFold } from '../hooks/store';
-import { BANNER_PREFIX, BANNER_ACK } from '../hooks/rebuild';
+import { BANNER_PREFIX, BANNER_ACK, foldIndexMessage } from '../hooks/rebuild';
 import { fakeEngine } from './fake-engine';
 import type { SessionMessage } from 'claude-code';
 
@@ -127,6 +127,65 @@ test('a folded entry whose stub has vanished is evicted, not counted, not matche
   const h = await handleHydrate(fake.$, cfg, 'fold-000');
   expect(h.includes('ORPHANED BODY')).toBe(true);
   expect(h.includes('evicted')).toBe(true);
+});
+
+// --- F10: a manual /compact must not hand a folded context to the stock summarizer ---
+
+// a transcript with nothing foldable left: the only tool result is fold-001's own stub
+function sweptTranscript(): SessionMessage[] {
+  const out: SessionMessage[] = [{ role: 'user', text: 'turn0', toolUses: [], handle: 'h0' }];
+  out.push({ role: 'assistant', text: '', toolUses: [{ tool_use_id: 't1', tool: 'Read', input: { file_path: 'a.ts' } }], handle: 'h1' });
+  out.push({ role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 't1', text: '[origami fold-001 · Read result folded] s — call hydrate("fold-001") for the full content.', isError: false }], handle: 'h2' });
+  for (let i = 1; i <= 4; i++) {
+    out.push({ role: 'user', text: `turn${i}`, toolUses: [], handle: `hu${i}` });
+    out.push({ role: 'assistant', text: `r${i}`, toolUses: [], handle: `ha${i}` });
+  }
+  return out;
+}
+
+test('manual compaction with nothing to fold is SKIPPED while live folds exist', async () => {
+  const fake = fakeEngine();
+  const io = await storeIO(fake.$);
+  await putFold(io, {
+    id: 'fold-001', stub: 's', state: 'folded', tool: 'Read', toolUseId: 't1',
+    inputKey: 'a.ts', originAge: 3, sizeTokens: 4000, hydrations: 0,
+  }, 'BODY');
+  const r = await runSweep(fake.$, cfg, { trigger: 'manual', messages: sweptTranscript() });
+  const skip = (r as { skip?: string })?.skip;
+  expect(typeof skip).toBe('string');
+  expect(skip!.includes('live folds')).toBe(true);
+  expect(skip!.includes('1 live folds')).toBe(true);
+  // the fold survived the guard: it was not evicted, so the stubs it protects stay valid
+  expect((await allFolds(io)).find(f => f.id === 'fold-001')!.state).toBe('folded');
+});
+
+test('manual compaction with nothing to fold and NO live folds still passes through', async () => {
+  const fake = fakeEngine();
+  const r = await runSweep(fake.$, cfg, { trigger: 'manual', messages: sweptTranscript() });
+  expect(r).toBe(undefined);   // stock compaction is harmless with nothing to lose
+});
+
+// --- F10, `auto` row: fold-index insurance. The registered session.compact hook
+// appends this message to the event it passes to next(); only the pure builder is
+// reachable from the test kit (registering hooks and driving a real compaction
+// through next() is not), so the message's shape is covered here and the hook's
+// wiring was verified by reading it. ---
+
+test('foldIndexMessage lists every live fold and is undefined when none is live', async () => {
+  const live = [
+    { id: 'fold-001', stub: 'auth flow notes', state: 'folded' as const },
+    { id: 'fold-007', stub: 'the failing test output', state: 'pinned' as const },
+    { id: 'fold-009', stub: 'gone', state: 'evicted' as const },
+  ];
+  const m = foldIndexMessage(live)!;
+  expect(m.role).toBe('user');
+  expect(m.handle).toBe(undefined);
+  expect(m.text.startsWith('[origami fold index — preserve these recovery links in any summary]')).toBe(true);
+  expect(m.text).toContain('fold-001 — auth flow notes');
+  expect(m.text).toContain('fold-007 — the failing test output');
+  expect(m.text.includes('fold-009')).toBe(false);          // evicted folds are not live
+  expect(foldIndexMessage([])).toBe(undefined);
+  expect(foldIndexMessage([live[2]])).toBe(undefined);      // only-evicted is no index
 });
 
 // --- finding 8(b): an insufficient outcome must persist NOTHING and arm the cooldown ---

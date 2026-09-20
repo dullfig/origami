@@ -1,5 +1,5 @@
 import type { Register, EngineInterface, SessionCompactInput, SessionCompactResult, SessionMessage } from 'claude-code';
-import { selectCandidates, rebuild, bannerText, stripBanner, applyBanner, foldIdsPresent, type FoldDecision, type RestoreDecision, candidateMass, estimateTokens } from './rebuild';
+import { selectCandidates, rebuild, bannerText, stripBanner, applyBanner, foldIdsPresent, foldIndexMessage, type FoldDecision, type RestoreDecision, candidateMass, estimateTokens } from './rebuild';
 import { runLibrarian, type CompleteFn } from './librarian';
 import { newFoldId, putFold, getFold, setFold, allFolds, appendLog, inputKeyOf, type FoldEntry, type StoreIO } from './store';
 
@@ -95,12 +95,15 @@ export async function shouldSweep(
 ): Promise<{ sweep: boolean; aggressive: boolean }> {
   const io = await storeIO($);
   const messages = messagesArg ?? await $.session.messages();
-  const liveTokens = messages.reduce((s, m) => s + estimateTokens(m.text)
-    + (m.toolResults ?? []).reduce((a, r) => a + estimateTokens(r.text), 0), 0);
-  const aggressive = liveTokens > cfg.workingSetBudget;
   // every live fold's original result is already folded (or pinned open) — its mass
   // must never re-trigger a sweep, whichever transcript view messages() returns
   const excluded = new Set((await allFolds(io)).filter(f => f.state !== 'evicted').map(f => f.toolUseId));
+  // F11: the same discount applies to the working-set figure. A raw transcript view
+  // still carrying already-folded results must not push the session into aggressive
+  // mode on mass that is, on disk, already reduced.
+  const liveTokens = messages.reduce((s, m) => s + estimateTokens(m.text)
+    + (m.toolResults ?? []).reduce((a, r) => a + (excluded.has(r.tool_use_id) ? 0 : estimateTokens(r.text)), 0), 0);
+  const aggressive = liveTokens > cfg.workingSetBudget;
   const mass = candidateMass(
     selectCandidates(messages, excluded, cfg, aggressive)
       .filter(c => !c.text.startsWith('[origami fold-')),
@@ -135,6 +138,12 @@ export async function runSweep(
     // pinned folds stay open: once restored inline their big results must never
     // become candidates again, so exclusion is by the toolUseId the entry recorded
     const excluded = new Set(folds.filter(f => f.state === 'pinned').map(f => f.toolUseId));
+    // F10: what a stock compaction would destroy if origami passes this event through
+    const liveFolds = folds.filter(f => f.state === 'folded' || f.state === 'pinned');
+    const manualGuard = (): SessionCompactResult | undefined =>
+      e.trigger === 'manual' && liveFolds.length > 0
+        ? { skip: `origami: nothing to fold — ${liveFolds.length} live folds already active; stock compaction would destroy their stubs` }
+        : undefined;
     const aggressive = Boolean(await io.storeGet(AGGRESSIVE));
     const candidates = selectCandidates(messages, excluded, cfg, aggressive)
       .filter(c => !c.text.startsWith('[origami fold-'));  // never re-fold a stub
@@ -151,7 +160,8 @@ export async function runSweep(
       }
     }
     if (candidates.length === 0 && restores.length === 0) {
-      return e.trigger === 'plugin' ? { skip: 'origami: nothing to fold' } : undefined;
+      if (e.trigger === 'plugin') return { skip: 'origami: nothing to fold' };
+      return manualGuard();   // manual+live folds → skip; otherwise pass through
     }
     const lib = candidates.length > 0
       ? await runLibrarian(completeWith($), cfg.librarianModel, candidates, aggressive)
@@ -175,12 +185,14 @@ export async function runSweep(
     }
     if (foldDecisions.length === 0 && restores.length === 0) {
       await io.storeSet(LAST_SKIP_MASS, candidateMass(candidates));
-      return e.trigger === 'plugin' ? { skip: 'origami: librarian kept everything' } : undefined;
+      if (e.trigger === 'plugin') return { skip: 'origami: librarian kept everything' };
+      return manualGuard();
     }
     const outcome = rebuild(messages, foldDecisions, restores, cfg, aggressive);
     if (outcome.kind === 'insufficient') {
       await io.storeSet(LAST_SKIP_MASS, candidateMass(candidates));
-      return e.trigger === 'plugin' ? { skip: `origami: reduction ${outcome.ratio.toFixed(2)} below threshold` } : undefined;
+      if (e.trigger === 'plugin') return { skip: `origami: reduction ${outcome.ratio.toFixed(2)} below threshold` };
+      return manualGuard();
     }
     for (const p of pending) await putFold(io, p.entry, p.body, p.header);
     await io.storeSet(LAST_SKIP_MASS, 0);
@@ -217,7 +229,10 @@ export async function handleHydrate($: EngineInterface, cfg: OrigamiConfig, fold
       : found.entry.state === 'evicted'
         ? `\n\n[origami: ${foldId} is evicted — its stub is no longer in the conversation, so it will not be restored inline. The content above is still the full stored body.]`
         : '';
-    return (found.header ? found.header + '\n\n' : '') + found.body + note;
+    // F9: the pin notice rides at BOTH ends. A large body may be preview-truncated
+    // (head only) in the model's view, so a tail-only notice can be lost entirely.
+    const lead = pinned ? note.trimStart() + '\n\n' : '';
+    return lead + (found.header ? found.header + '\n\n' : '') + found.body + note;
   } catch (err) {
     return `origami could not hydrate "${foldId}": ${err instanceof Error ? err.message : String(err)}. The stored body may have been removed; re-run the original tool if you need the content.`;
   }
@@ -250,6 +265,12 @@ export async function observeMissedHydrate(
   } catch { /* observation must never break a tool call */ }
 }
 
+// The standing session-start notice: independent of the sweep-time banner, which
+// only exists once a first sweep has folded something. It kills the pre-first-sweep
+// confusion ("no banner — is the hook misplaced?") and pre-arms the model against
+// discovering mid-session that its context changed shape.
+export const SESSION_NOTICE = '[origami is active in this session (BETA). Your context is a RENDERING that origami may rewrite between turns: bulky older tool results can be folded away to disk and replaced with [origami fold-…] stubs, and can return. Once folds exist, a status banner appears at the very top of the context. Nothing is ever lost — folded content is recoverable via the hydrate tool. If the context seems to have changed shape between turns, it has; your own earlier messages are your record of what you saw.]';
+
 export const register: Register = (on, options) => {
   const config = readConfig(options);
   let sweeping = false;
@@ -273,7 +294,18 @@ export const register: Register = (on, options) => {
   });
   on('session.compact', async ($, e, next) => {
     const result = await runSweep($, config, e);
-    return result ?? next(e);
+    if (result) return result;
+    // F10, `auto` row: origami must never block an auto compaction (the window is
+    // genuinely full), but it can make the stock summarizer's INPUT carry the fold
+    // index, so the recovery links have explicit list-shaped material to survive in.
+    // Only the main thread has folds; subagents and precompute pass through bare.
+    if (e.trigger === 'auto' && !e.agentId) {
+      try {
+        const index = foldIndexMessage(await allFolds(await storeIO($)));
+        if (index) return next({ ...e, messages: [...e.messages, index] });
+      } catch { /* insurance is best-effort: never block the compaction it protects */ }
+    }
+    return next(e);
   });
   on('session.start', async ($, e, next) => {
     await $.tool.register({
@@ -287,6 +319,15 @@ export const register: Register = (on, options) => {
       inputSchema: { type: 'object', properties: { fold_id: { type: 'string' } }, required: ['fold_id'] },
     });
     return next(e);
+  });
+  // The standing session-start notice (spec addendum). `session.start`'s own result
+  // is `{ cwd }` and nothing else (types/claude-code.d.ts :9031-9036 — "a hook's own
+  // value does not change the session"), so it cannot carry model-visible text. The
+  // SAME session-start event in its classic form can: ClassicResultFields.SessionStart
+  // lists 'additionalContext' (:1063), handed to the model with the event (:991-994).
+  on('classic.SessionStart', async ($, e, next) => {
+    const result = await next(e);
+    return { ...result, additionalContext: [...(result.additionalContext ?? []), SESSION_NOTICE] };
   });
   // Serve the two declared tools: a tool.call hook must answer with `{ result }`
   // (core sets `text` for the model from it; a hook's own `{ text }` is not read —
