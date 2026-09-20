@@ -165,6 +165,25 @@ test('manual compaction with nothing to fold and NO live folds still passes thro
   expect(r).toBe(undefined);   // stock compaction is harmless with nothing to lose
 });
 
+test('a sweep that throws mid-way still guards a manual compaction when folds are live', async () => {
+  const fake = fakeEngine();
+  const io = await storeIO(fake.$);
+  await putFold(io, {
+    id: 'fold-001', stub: 's', state: 'folded', tool: 'Read', toolUseId: 'tOld',
+    inputKey: 'a.ts', originAge: 3, sizeTokens: 4000, hydrations: 0,
+  }, 'BODY');
+  fake.setModelComplete(() => { throw new Error('model down'); });
+  // fold-001's stub is present, so the lifecycle reconcile keeps it live; transcript()
+  // also has real foldable mass, so the librarian is reached — and throws AFTER the
+  // fold index was read. liveFolds is known, so the guard still applies.
+  const t = transcript();
+  t[0] = { ...t[0], text: 'turn0 — see [origami fold-001 · Read result folded] s' };
+  const r = await runSweep(fake.$, cfg, { trigger: 'manual', messages: t });
+  const skip = (r as { skip?: string })?.skip;
+  expect(typeof skip).toBe('string');
+  expect(skip!.includes('live folds')).toBe(true);
+});
+
 // --- F10, `auto` row: fold-index insurance. The registered session.compact hook
 // appends this message to the event it passes to next(); only the pure builder is
 // reachable from the test kit (registering hooks and driving a real compaction

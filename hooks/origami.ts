@@ -120,6 +120,16 @@ export async function runSweep(
 ): Promise<SessionCompactResult | undefined> {
   if (e.agentId) return undefined;                       // main thread only
   if (e.trigger === 'precompute') return undefined;      // out of scope v1
+  // F10: what a stock compaction would destroy if origami passes this event through.
+  // Declared OUTSIDE the try so the catch path can apply the same guard: a sweep that
+  // throws after the index was read (librarian down, rebuild invariant) must not hand
+  // a folded context to the stock summarizer either. An exception BEFORE the index is
+  // read leaves this [] — origami then has no verified picture and passes through.
+  let liveFolds: FoldEntry[] = [];
+  const manualGuard = (): SessionCompactResult | undefined =>
+    e.trigger === 'manual' && liveFolds.length > 0
+      ? { skip: `origami: nothing to fold — ${liveFolds.length} live folds already active; stock compaction would destroy their stubs` }
+      : undefined;
   try {
     const io = await storeIO($);
     // strip any existing banner pair first: all subsequent logic runs on the
@@ -138,12 +148,7 @@ export async function runSweep(
     // pinned folds stay open: once restored inline their big results must never
     // become candidates again, so exclusion is by the toolUseId the entry recorded
     const excluded = new Set(folds.filter(f => f.state === 'pinned').map(f => f.toolUseId));
-    // F10: what a stock compaction would destroy if origami passes this event through
-    const liveFolds = folds.filter(f => f.state === 'folded' || f.state === 'pinned');
-    const manualGuard = (): SessionCompactResult | undefined =>
-      e.trigger === 'manual' && liveFolds.length > 0
-        ? { skip: `origami: nothing to fold — ${liveFolds.length} live folds already active; stock compaction would destroy their stubs` }
-        : undefined;
+    liveFolds = folds.filter(f => f.state === 'folded' || f.state === 'pinned');
     const aggressive = Boolean(await io.storeGet(AGGRESSIVE));
     const candidates = selectCandidates(messages, excluded, cfg, aggressive)
       .filter(c => !c.text.startsWith('[origami fold-'));  // never re-fold a stub
@@ -208,7 +213,8 @@ export async function runSweep(
     return { messages: finalMessages, tokensBefore: outcome.tokensBefore, tokensAfter: outcome.tokensAfter };
   } catch (err) {
     $.ui.log(`origami sweep failed, falling back: ${err instanceof Error ? err.message : String(err)}`);
-    return e.trigger === 'plugin' ? { skip: 'origami: sweep failed' } : undefined;
+    if (e.trigger === 'plugin') return { skip: 'origami: sweep failed' };
+    return manualGuard();   // a failed sweep is still no reason to let stock wipe live stubs
   }
 }
 
