@@ -141,6 +141,32 @@ guard message — the same command that had wiped the prior session):
    stubbed". Role alternation via the proven user+ack pair. Multiple sweeps
    leave a trail of markers.
 
+## v2+ sketch: Marian, the decision genealogist (Dan, 2026-09-19 22:01)
+
+With a permanent transcript (cleanupPeriodDays now archival) and chapter
+folds, origami gains the substrate for a decision genealogy: Marian — the
+librarian writes the stubs, Marian keeps the card catalog of WHY.
+
+- **Extraction at fold time, by the reader who sees everything.** The
+  librarian invariant already pays for a full read of whatever folds; Marian
+  is a second output of that same read: decision events emitted alongside
+  the stub — decided X, because Y, supersedes Z — each anchored to VERBATIM
+  transcript coordinates (session id + row), never to paraphrase. Chapter
+  folds are the natural unit: cataloging a chapter's decisions is part of
+  folding it.
+- **Query side:** a lineage tool (hydrate's sibling): ask about a decision,
+  get its ancestry chain — made / amended / superseded / revived — with
+  hydrate:// links into the folds where each link was forged. Answers carry
+  receipts, not recollections.
+- **What it fixes:** supersession is exactly what summaries lose ("summaries
+  preserve PLANS better than their RETIREMENTS"); Marian's records cannot
+  launder through a summary boundary (they cite the verbatim tier), and a
+  model can settle "did I decide this or inherit it from a summary?" against
+  the record — closing the Dory effect's last gap.
+- **Relation to memory-rlm:** memory_decisions indexes after the fact from
+  outside; Marian extracts at fold time from inside, into the same store the
+  projection layer already trusts. This is the supersession path.
+
 Open questions for the v2 implementation:
 - Chapter sizing (fixed turn count vs. librarian-chosen topical boundaries).
 - Whether chapter stubs occupy a user or assistant slot (role alternation).
