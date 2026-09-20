@@ -79,6 +79,33 @@ Consequences:
 - Anchor-hydration telemetry extends naturally to chapters (which concepts
   pull models back into which conversations — the prefetch training signal).
 
+## v1.1 design: resume re-projection (accepted, not yet implemented)
+
+Problem: a resumed session boots from the transcript's verbatim tier (F1
+observed this headlessly; interactive --resume is the untested cell), so the
+model sees raw history instead of the folded projection, and re-folding today
+would re-pay the librarian and mint duplicate fold ids.
+
+Design (Dan, 2026-09-19 evening) — three small pieces, no transcript reading:
+1. **Stub-reuse in runSweep**: a candidate whose toolUseId matches an
+   existing non-evicted fold reuses that fold's id and stored stub verbatim —
+   no librarian call, no new putFold (body already on disk). Re-folding a
+   known result becomes free and id-stable, and the reconcile stops evicting
+   resumed folds.
+2. **Stub-presence refinement to the F2/F11 discounts**: shouldSweep must
+   discount a fold's mass only when its STUB is present in the current view
+   (foldIdsPresent), not merely because the fold exists in the store. As
+   shipped, the store-existence predicate suppresses the trigger on a
+   resumed-raw context (originals visible, stubs absent, mass discounted to
+   ~0) — the discount and the self-heal fight each other. With the
+   refinement, a raw boot has full visible mass, the first turn.complete
+   fires the sweep, and piece 1 makes the re-projection instant.
+3. **Optional session.start(resume) nudge**: when the start source is
+   `resume` and live folds exist whose stubs are absent from the booted
+   view, call `$.session.compact()` immediately (interactive only; the
+   headless refusal is caught as usual) so the user never sees the raw
+   flash. Without the nudge, piece 2 alone self-heals within one turn.
+
 Open questions for the v2 implementation:
 - Chapter sizing (fixed turn count vs. librarian-chosen topical boundaries).
 - Whether chapter stubs occupy a user or assistant slot (role alternation).
