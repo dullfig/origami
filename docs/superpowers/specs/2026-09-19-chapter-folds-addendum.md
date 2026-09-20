@@ -106,6 +106,27 @@ Design (Dan, 2026-09-19 evening) — three small pieces, no transcript reading:
    headless refusal is caught as usual) so the user never sees the raw
    flash. Without the nudge, piece 2 alone self-heals within one turn.
 
+v1.1 refinements from the second live session (2026-09-19, ~21:35-21:47 —
+which also FIELD-VERIFIED the whole v1 wave: session-start notice quoted by
+the model unprompted; banner bullet deployed verbatim; reconcile evicted the
+wiped session's orphan entries, banner counted only live folds; automatic
+plugin sweep 76,258→3,954; and /compact with 5 live folds REFUSED with the
+guard message — the same command that had wiped the prior session):
+4. **The stub-presence predicate belongs in the missed-hydrate observer
+   too**: a Read matching a fold whose stub is NOT present in the current
+   view (wiped by stock compaction, or pre-resume-reprojection) is a FALSE
+   POSITIVE of the health metric — observed live (old fold-004 scored a
+   miss against a model that had no stub to hydrate from). One predicate,
+   three consumers: trigger discount, resume re-projection, observer.
+5. **Banner bullet needs a provenance boundary**: "your own earlier messages
+   are your record" holds within an unbroken session, but a stock-summary
+   boundary launders provenance — after one, part of "your record" is
+   secondhand paraphrase that can confabulate (observed live: the summary
+   invented a nonexistent "shard-24 coordination section", caught by the
+   model on re-read). Reword to "within this session, since the last
+   summary" — and note this is chapter folds' strongest argument: a chapter
+   stub's backing record never degrades to paraphrase.
+
 Open questions for the v2 implementation:
 - Chapter sizing (fixed turn count vs. librarian-chosen topical boundaries).
 - Whether chapter stubs occupy a user or assistant slot (role alternation).
