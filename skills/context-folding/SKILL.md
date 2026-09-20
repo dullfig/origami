@@ -1,73 +1,41 @@
-# Context Folding
+---
+name: context-folding
+description: Use when the conversation contains [origami fold-…] stubs, when you need detail that was folded, or when deciding whether to re-run a tool whose earlier result may have been folded.
+---
 
-You have a **context folding** system active. It preserves your full
-conversation history at variable resolution — every section has an
-always-visible self-compressed summary, and full detail is stored on
-disk, expandable on demand.
+# Living with folded context
 
-## Fold Index
+This session runs Origami: bulky stale tool results are folded to disk and
+replaced with stubs whose links advertise what is inside:
 
-After compaction you'll see a fold index:
+    [origami fold-012 · Read result folded] src/auth.ts (480 lines):
+    [JWT validation](hydrate://fold-012#jwt),
+    [refresh flow](hydrate://fold-012#refresh),
+    [SECRET_ROTATION constant](hydrate://fold-012#rotation)
 
-```
-[CONTEXT FOLDING — 5 sections, 14200 tokens stored]
+A stub means you once knew this in full and can know it again instantly.
+A `hydrate://` link is followed by calling the `hydrate` tool with the
+link's fold id — and its `#fragment` as `anchor`, so the log learns which
+concept pulled you back.
 
-[F001 | FOLDED | 3200 tok | rel:0.15]
-auth.mid>refac: jwt.decode>jwt.verify | tok.refresh.chain.fix | D:auth.mid.ts,auth.svc.ts
+## Rules
 
-[F002 | UNFOLDED | 2800 tok | rel:0.85]
-<full detail visible>
-```
-
-Each entry shows: fold ID, status, detail token count, relevance score,
-and the self-compressed summary.
-
-## Available Tools
-
-| Tool | When to use |
-|------|-------------|
-| `unfold_section(fold_id)` | You need specific code, errors, or decisions from a folded section |
-| `fold_section(fold_id)` | You're done referencing a section — free up context space |
-| `list_folds()` | See the full fold index with status and summaries |
-| `write_summary(fold_id, summary)` | Create or update a fold's self-compressed summary |
-
-## When to Unfold
-
-- A user references something discussed in a folded section
-- You need exact code, error messages, or file contents from earlier
-- You're building on prior work and need precise details
-- The summary alone is insufficient to answer accurately
-
-## When to Fold Back
-
-- You've finished using a section's detail
-- Context is getting large and you need space
-- The section is no longer relevant to the current task
-
-## Writing Summaries
-
-When you call `write_summary`, use this dense format — you are the
-**only reader**, so maximise information density:
-
-- Abbreviations: `>refac`, `>impl`, `>fix`, `>add`, `>mod`, `>del`
-- Compress paths: `auth.middleware.ts` → `auth.mid.ts`
-- Note cross-references: `"builds on F003"`
-- Format: `topic>action: key.details | outcome | D:files`
-
-**Example:**
-```
-auth.mid>refac: jwt.decode>jwt.verify | tok.refresh.chain.fix | D:auth.mid.ts,auth.svc.ts
-```
-
-## Token Awareness
-
-Each fold shows its token count. Research shows LLM performance degrades
-well before context is exhausted, so **aggressive folding is preferred**:
-- Unfold ONLY what you actively need right now
-- Fold sections back IMMEDIATELY when done
-- Prefer re-reading a summary over keeping a section unfolded "just in case"
-- Maximum 3 sections unfolded at once
-
-The system enforces a tight token budget (20% of context window, max 3
-simultaneous unfolds). Keep context lean - smaller context means better
-reasoning on what's actually there.
+1. **Hydrate before re-running.** If a stub's links cover what you need,
+   call `hydrate(fold_id)` instead of re-running the tool. A re-read is not
+   idempotent: files change, tests flake, command output drifts. The fold is
+   the exact bytes you saw. (Whole fold comes back regardless of anchor.)
+2. **Hydrated content may fold again** after a few turns. That is normal; the
+   stub returns and hydrate still works.
+3. **Repeated need pins automatically.** The second hydrate of the same fold
+   pins it open: it is restored inline and stops folding.
+4. **Unpin what stops earning its place.** If pinned content is no longer
+   relevant, call `unpin(fold_id)` so the context stays lean.
+5. Do not quote a stub as if it were the content. If the stub is not enough
+   to answer precisely, hydrate first.
+6. The `[ORIGAMI v…]` banner at the top is the plugin's own status notice
+   (static rules, written once); its acknowledgment is synthetic (inserted
+   by origami, labeled as such), not something you actually said.
+7. A `[origami sweep report: …]` message is a synthetic marker Origami
+   inserts inline after each sweep, reporting what was folded/restored and
+   how many folds are active at that point in the conversation. Its
+   acknowledgment is synthetic too — same labeling as the banner's.

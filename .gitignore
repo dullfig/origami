@@ -2,6 +2,8 @@ node_modules/
 __pycache__/
 *.pyc
 .claude/context-folding/
+.claude/memory-rlm.db*
+.claude/origami/
 *.egg-info/
 dist/
 build/
