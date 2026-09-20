@@ -183,6 +183,10 @@ content. The full content is intact on disk — nothing is lost.
 - Statements you made before a fold were made with the full content in
   view; your own earlier messages are your record of what you saw.
   Distrust only claims sourced from a stub alone.
+- Do not be confused when the conversation below discusses content that
+  now shows only as a stub: the conversation is rewritten in place, and
+  that content was fully visible when those messages were written. It is
+  not a contradiction, and nobody misspoke.
 Currently ${activeFolds} folds active. (This notice is updated in place at each sweep.)]`;
 }
 
