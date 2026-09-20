@@ -127,6 +127,20 @@ guard message — the same command that had wiped the prior session):
    summary" — and note this is chapter folds' strongest argument: a chapter
    stub's backing record never degrades to paraphrase.
 
+6. **Banner architecture split (Dan, 21:50 — accepted for v1.1, supersedes
+   the count-in-banner and its "(updated in place)" note):** the top banner
+   becomes STATIC — rules only (rendering warning, hydrate discipline, BETA
+   DUTY, the pre-fold-record rule, the rewritten-in-place bullet), written
+   once at the first sweep and never touched again (also a prompt-cache win:
+   today every sweep rewrites index 0 and busts the cache from token zero).
+   The mutable part moves INLINE: each sweep appends a small marker pair at
+   the sweep point — "[origami sweep: folded fold-NNN…, restored …; N folds
+   now active. Content discussed above may now render as stubs.]" + tiny
+   ack — historically true at its position forever, giving the model an
+   explicit timeline boundary between "content visible" and "content
+   stubbed". Role alternation via the proven user+ack pair. Multiple sweeps
+   leave a trail of markers.
+
 Open questions for the v2 implementation:
 - Chapter sizing (fixed turn count vs. librarian-chosen topical boundaries).
 - Whether chapter stubs occupy a user or assistant slot (role alternation).
