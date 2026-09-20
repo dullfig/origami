@@ -222,6 +222,20 @@ SessionStart:compact after F5) works — but fires on origami sweeps too, where
 its "your context was just summarized" text is wrong; it cannot distinguish
 trigger values the way PostCompact matchers can.
 
+**F13 (transcript semantics, raised by ringhub-integration; VERIFIED on the
+live session's JSONL): origami sweeps do NOT rewrite the transcript.** A
+hook-returned `{messages}` result rides the same append-boundary machinery as
+stock compaction: the folded projection is appended after a boundary and the
+verbatim history endures beneath. Proof: the interactive session's transcript
+simultaneously holds content that exists ONLY in the raw Read results (9 hits
+for a shard value never discussed or stubbed), 35 stub markers, 11 banner
+copies, and the stock-compaction records. The JSONL stays the lossless
+artifact tier; fold bodies are a SECOND copy, never the sole survivor;
+origami edits the projection, never the record. Corollary: headless F1 (raw
+resume) exists precisely because the originals endure — resume semantics for
+a folded session (does interactive --resume boot folded?) remain the one
+untested cell.
+
 ## Remaining before/after merge
 
 - Dan's ruling on F10's fallback-matrix change (manual + nothing-to-fold +
