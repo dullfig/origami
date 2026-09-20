@@ -188,19 +188,20 @@ re-read memory after a summary — advice that is noise after an Origami
 sweep, which keeps conversation text verbatim and keeps folded content
 fully recoverable via `hydrate`.
 
-Observed (2026-09-19 smoke test, Claude Code 2.1.278): classic PostCompact
-hooks DO fire on origami sweeps. A sweep initiated by `/compact` reaches them
-with matcher value `manual` (debug log: `PostCompact:manual`), so classic
-hooks cannot distinguish an origami fold sweep from a stock manual compaction
-on the trigger value alone. A `$.session.compact()`-triggered sweep is
-expected to report `plugin`, but could not be observed yet: in headless
-(`-p`/SDK) sessions the engine rejects `$.session.compact()` outright
-("not available in a headless session yet"), so the automatic trigger only
-operates interactively. If your classic PostCompact hooks assume lossy
-compaction, gate them to `auto` only — `manual` may now be a lossless
-origami sweep.
+Observed (2026-09-19 smoke tests, Claude Code 2.1.278): classic PostCompact
+hooks DO fire on origami sweeps. An automatic (mass-triggered) sweep reaches
+them with trigger value **`plugin`**; a sweep initiated by `/compact` reaches
+them as **`manual`**. Gate classic hooks that assume lossy compaction to
+`auto` (and `manual` if you never type /compact expecting a fold sweep) —
+`plugin` is always a lossless origami sweep.
 
-<!-- TODO(smoke-interactive): confirm the `plugin` trigger value for automatic sweeps in an interactive session -->
+**Warning — stock compaction destroys fold context.** If built-in
+summarization runs over a folded conversation (e.g. `/compact` when origami
+finds nothing to fold and passes through, or auto-compact at the window
+limit), the summary replaces the banner and every `[origami fold-…]` stub:
+fold bodies remain safe on disk, but the model loses its hydrate links.
+Avoid manual `/compact` when the banner shows active folds and the context
+is already lean.
 
 Note for headless use: because `$.session.compact()` is unavailable under
 `-p`, automatic mass-triggered sweeps never fire there (the trigger detects

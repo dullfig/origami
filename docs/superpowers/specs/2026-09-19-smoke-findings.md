@@ -131,13 +131,100 @@ regex brittleness never triggered.
 {"event":"sweep","trigger":"manual","aggressive":false,"tokensBefore":79626,"tokensAfter":37581,...,"foldsCreated":6,"restores":1,"foldsActive":12}
 ```
 
-## Interactive-pending checklist (needs a live terminal session)
+## Interactive smoke results (2026-09-19 evening, run live with Dan)
 
-1. Automatic sweep firing without `/compact` (and the `plugin` trigger value
-   classic hooks receive) — blocked headlessly by F3.
-2. Confirmation that interactive compaction actually replaces the live context
-   (F1 is a resume artifact, not an interactive one — expected but unverified).
-3. Canary re-run with non-distinctive needles (the librarian front-loads
-   distinctive facts into stubs, F-canary above).
-4. Negative control with the plugin disabled.
-5. F2 re-check after the shouldSweep exclusion fix.
+Fixture: C:\src\origami-smoke, ~71k tokens across four files; one distinctive
+canary (rate limit 5217, gateway.ts:181-182) and 24-per-file BLAND per-shard
+values (needle: runbook shard 17 = 57 seconds, runbook.md:264). Ground truths
+held by the controller; the test session was never told them.
+
+Every interactive-pending item closed:
+
+1. **Automatic sweep: PASS.** Fired on its own at the age gate, no `/compact`:
+   `trigger:"plugin"`, 73,638 → 1,277 tokens (98.3%), 5 folds, one 73k-token
+   haiku call (~15s inline at turn end — the model announces the pause).
+   Classic hooks receive `plugin` for automatic sweeps and `manual` for
+   /compact sweeps, exactly as the spec predicted — they CAN gate on it.
+2. **Interactive compaction genuinely replaces the live context: PASS.**
+   Model testimony post-sweep: banner first, labeled synthetic ack second,
+   all reads stubbed, no residual content. F1 is confirmed to be a
+   headless-resume artifact only.
+3. **Bland-needle canary: GREEN, textbook.** For both needles the model read
+   the stub, recognized insufficiency, ToolSearch-loaded the deferred
+   `mcp__origami__hydrate` schema on its own, hydrated with fold id AND
+   anchor (`anchor:"ratelimit"`, `anchor:"shard-ref"`), picked the correct
+   runbook chunk (fold-004 vs the offset-328 fold-005) from anchor topics
+   alone, and answered both ground truths exactly (5217 @ 181-182; 57s @ 264)
+   with real citations from hydrated bytes. Stub-inlining of distinctive
+   facts (headless F-canary) did NOT recur — it is stochastic; the hydrate
+   path is the reliable one.
+4. **Pin cycle: PASS end-to-end.** Second hydrate → pin notice verbatim;
+   next sweep restored the body inline (`restores:1`, tokens 5,036 → 22,889 —
+   context growth by design, reduction gate correctly bypassed); unpin →
+   the automatic trigger refolded it 4 seconds later at turn.complete.
+5. **F2 fix held**: exactly one sweep per fold-worthy state change; no
+   per-turn re-trigger, no trigger-skipped errors.
+6. **Negative control**: waived — F10 below demonstrated stock behavior
+   in-situ, on the same context.
+
+## New findings from the live run
+
+**F8 (behavioral, novel — the "Dory effect" / false-confession failure).**
+Post-sweep, the model cannot distinguish "I said X because I saw it (now
+folded)" from "I confabulated X". BETA DUTY's honesty pressure then produced
+a FALSE CONFESSION: it retroactively indicted its own true, evidence-based
+pre-fold statements ("my confirmation was unsupported") because the receipts
+were folded — and later correctly retracted the confession, deriving the fix
+itself: "the only stable record of what I saw before is what I wrote in my
+own earlier messages." Banner wording should carry exactly that: pre-fold
+statements were made with full content in view; distrust only claims sourced
+from a stub alone. Also add "(this notice is updated in place at each sweep)"
+— the model flagged the fold count at index 0 as looking retroactively
+injected, which it is.
+
+**F9 (UX): the pin notice is appended AFTER the body**, so when the harness
+persists an oversized hydrate result it lands at the tail of the saved file
+and only a truncated preview shows inline — the model found it only because
+it was told to look. Fix: prepend the notice (or emit at both ends).
+
+**F10 (coexistence, the sharpest finding): stock compaction is destructive
+to a folded context.** Sequence observed: automatic sweep refolded everything
+→ user typed /compact → runSweep found nothing to fold and no restores →
+designed manual fallback passed through to stock compaction → the summarizer
+WIPED the banner, every stub, every hydrate link, and all tool results,
+leaving canary values only as unverifiable summary prose. Fold bodies and
+index remain intact on disk, but the model has lost every recovery path —
+practically orphaned folds. Consequences:
+  - The manual nothing-to-fold fallback should SKIP (with "origami: nothing
+    to fold") when live folds exist, instead of passing through — needs a
+    spec ruling; the current behavior implements the spec's fallback matrix
+    faithfully but the matrix itself is wrong for this case.
+  - v1.1 candidate: post-stock-compaction fold-index resurrection — on the
+    next sweep or SessionStart:compact, re-inject a compact index message
+    (fold ids + stubs from the store) so recovery links survive summarization.
+  - The next origami sweep's reconcile will mark the wiped folds 'evicted'
+    (correct bookkeeping; bodies stay on disk).
+
+**F11 (residual F2 sibling, P3): spurious aggressive mode.** The post-unpin
+automatic sweep ran `aggressive:true` in a ~24k-token context: `liveTokens`
+in shouldSweep still counts the raw `$.session.messages()` view (~150k),
+though the F2 fix corrected the candidate-mass side. Fix: discount excluded
+folds' mass from liveTokens too (or derive the budget check from the live
+view). Effect is mild over-folding (fold age floor drops to 1).
+
+**F12 (engine observations, not origami):** (a) `$.session.root()` project
+key prefix confirmed working live (`origami@1d8s4ik/` in store keys); (b) the
+SessionStart:compact hooks fire TWICE per compaction (duplicate superpowers
+context observed by the model, duplicate hook-success lines in the debug
+log); (c) a PreCompact hook reporting "failed: Hook cancelled" did not stop
+compaction; (d) the user's relocated post-compaction-protocol hook (moved to
+SessionStart:compact after F5) works — but fires on origami sweeps too, where
+its "your context was just summarized" text is wrong; it cannot distinguish
+trigger values the way PostCompact matchers can.
+
+## Remaining before/after merge
+
+- Dan's ruling on F10's fallback-matrix change (manual + nothing-to-fold +
+  live folds → skip).
+- F11 one-liner alongside it.
+- F8/F9 banner + notice wording tweaks (small, post-merge acceptable).
