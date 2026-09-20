@@ -188,13 +188,24 @@ re-read memory after a summary — advice that is noise after an Origami
 sweep, which keeps conversation text verbatim and keeps folded content
 fully recoverable via `hydrate`.
 
-A `$.session.compact()`-triggered sweep reports a distinct trigger value to
-classic hooks (expected: `plugin`, distinct from `manual`/`auto`). If your
-classic PostCompact hooks assume lossy compaction, gate them to the
-`manual`/`auto` matchers so they fire only on stock compaction — the only
-kind that still deserves them.
+Observed (2026-09-19 smoke test, Claude Code 2.1.278): classic PostCompact
+hooks DO fire on origami sweeps. A sweep initiated by `/compact` reaches them
+with matcher value `manual` (debug log: `PostCompact:manual`), so classic
+hooks cannot distinguish an origami fold sweep from a stock manual compaction
+on the trigger value alone. A `$.session.compact()`-triggered sweep is
+expected to report `plugin`, but could not be observed yet: in headless
+(`-p`/SDK) sessions the engine rejects `$.session.compact()` outright
+("not available in a headless session yet"), so the automatic trigger only
+operates interactively. If your classic PostCompact hooks assume lossy
+compaction, gate them to `auto` only — `manual` may now be a lossless
+origami sweep.
 
-<!-- TODO(smoke): replace with observed trigger value from Task 10 -->
+<!-- TODO(smoke-interactive): confirm the `plugin` trigger value for automatic sweeps in an interactive session -->
+
+Note for headless use: because `$.session.compact()` is unavailable under
+`-p`, automatic mass-triggered sweeps never fire there (the trigger detects
+the condition, logs, and falls through cleanly). A `/compact` prompt runs
+the full fold sweep in headless sessions.
 
 ## Early-access caveat
 
