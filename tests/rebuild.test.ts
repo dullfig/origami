@@ -1,7 +1,8 @@
 import { test, expect } from 'claude-code/testing';
 import {
-  rebuild, stubText, estimateTokens,
+  rebuild, stubText, estimateTokens, turnAges,
   bannerText, stripBanner, applyBanner, BANNER_PREFIX, BANNER_ACK,
+  sweepMarkerPair, foldIdsPresent, MARKER_PREFIX,
 } from '../hooks/rebuild';
 import { readConfig } from '../hooks/origami';
 import type { SessionMessage } from 'claude-code';
@@ -75,25 +76,26 @@ test('insufficient reduction reports instead of rebuilding', async () => {
   expect(r.kind).toBe('insufficient');
 });
 
-// --- Banner (controller amendment 2) ---
+// --- Banner (controller amendment 2; v1.1 item 6 split it static/inline) ---
 
 test('bannerText contains required elements and starts with BANNER_PREFIX', async () => {
-  const b = bannerText('1.0', 3);
+  const b = bannerText('1.0');
   expect(b.startsWith(BANNER_PREFIX)).toBe(true);
   expect(b).toContain('ORIGAMI v1.0');
-  expect(b).toContain('Currently 3 folds active.');
   expect(b).toContain('hydrate');
   expect(b).toContain('BETA DUTY');
   // F8: the model's own earlier messages are trustworthy; only stub-sourced claims are not
   expect(b).toContain('your own earlier messages are your record of what you saw');
   expect(b).toContain('Distrust only claims sourced from a stub alone.');
-  // F8: the banner is rewritten every sweep, not a stale one-off
-  expect(b).toContain('(This notice is updated in place at each sweep.)');
+  // v1.1 item 6: the banner is now STATIC — no count, no per-sweep rewrite language
+  expect(b).not.toContain('Currently');
+  expect(b).not.toContain('(This notice is updated in place');
+  expect(b).toContain('This notice is written once; per-sweep reports appear inline in the conversation below.');
 });
 
 test('applyBanner prepends a handle-less user+assistant pair', async () => {
   const t = transcript();
-  const banner = bannerText('1.0', 1);
+  const banner = bannerText('1.0');
   const withBanner = applyBanner(t, banner);
   expect(withBanner.length).toBe(t.length + 2);
   expect(withBanner[0].role).toBe('user');
@@ -107,7 +109,7 @@ test('applyBanner prepends a handle-less user+assistant pair', async () => {
 
 test('stripBanner is the inverse of applyBanner, and a no-op without a banner', async () => {
   const t = transcript();
-  const bannered = applyBanner(t, bannerText('1.0', 1));
+  const bannered = applyBanner(t, bannerText('1.0'));
   const stripped = stripBanner(bannered);
   expect(stripped.length).toBe(t.length);
   expect(stripped.map(m => m.handle)).toEqual(t.map(m => m.handle));
@@ -117,12 +119,65 @@ test('stripBanner is the inverse of applyBanner, and a no-op without a banner', 
   expect(noBanner.map(m => m.handle)).toEqual(t.map(m => m.handle));
 });
 
-test('re-banner round trip updates the fold count with exactly one banner', async () => {
+test('re-banner round trip yields exactly one banner, identical text (static, no count)', async () => {
   const t = transcript();
-  const bannered = applyBanner(t, bannerText('1.0', 1));
-  const rebannered = applyBanner(stripBanner(bannered), bannerText('1.0', 5));
+  const bannered = applyBanner(t, bannerText('1.0'));
+  const rebannered = applyBanner(stripBanner(bannered), bannerText('1.0'));
   expect(rebannered.length).toBe(t.length + 2);
   const bannerCount = rebannered.filter(m => m.role === 'user' && m.text.startsWith(BANNER_PREFIX)).length;
   expect(bannerCount).toBe(1);
-  expect(rebannered[0].text).toContain('Currently 5 folds active.');
+  expect(rebannered[0].text).toBe(bannered[0].text); // static text is stable across rebanners
+});
+
+// --- Sweep marker pair (v1.1 item 6: mutable status moves inline) ---
+
+test('sweepMarkerPair reports folded/restored ids and active count', async () => {
+  const [user, ack] = sweepMarkerPair({ foldedIds: ['fold-013', 'fold-014'], restoredIds: ['fold-009'], activeFolds: 3 });
+  expect(user.role).toBe('user');
+  expect(user.handle).toBe(undefined);
+  expect(user.text.startsWith(MARKER_PREFIX)).toBe(true);
+  expect(user.text).toContain('folded fold-013, fold-014');
+  expect(user.text).toContain('restored fold-009');
+  expect(user.text).toContain('3 folds now active');
+  expect(user.text).toContain('hydrate to recover it.');
+  // CRITICAL: must never contain the stub prefix, or foldIdsPresent would immortalize
+  // dead folds by reading a marker mention as a live stub
+  expect(user.text.includes('[origami fold-')).toBe(false);
+  expect(ack.role).toBe('assistant');
+  expect(ack.handle).toBe(undefined);
+  expect(ack.text).toBe('Noted. [synthetic acknowledgment inserted by origami]');
+});
+
+test('sweepMarkerPair renders empty folded/restored lists as "nothing"', async () => {
+  const [user] = sweepMarkerPair({ foldedIds: [], restoredIds: [], activeFolds: 0 });
+  expect(user.text).toContain('folded nothing');
+  expect(user.text).toContain('restored nothing');
+  expect(user.text).toContain('0 folds now active');
+});
+
+test('foldIdsPresent: a marker mention of a fold id is NOT stub presence; a real stub is', async () => {
+  const [marker] = sweepMarkerPair({ foldedIds: ['fold-013'], restoredIds: [], activeFolds: 1 });
+  const withMarkerOnly: SessionMessage[] = [{ role: 'user', text: marker.text, toolUses: [] }];
+  expect(foldIdsPresent(withMarkerOnly).has('fold-013')).toBe(false);
+
+  const withRealStub: SessionMessage[] = [
+    { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 't1', text: stubText('fold-013', 'Read', 'stub'), isError: false }] },
+  ];
+  expect(foldIdsPresent(withRealStub).has('fold-013')).toBe(true);
+});
+
+test('turnAges: a marker pair inserted between turns leaves surrounding ages unchanged', async () => {
+  const t = transcript();
+  const withoutMarker = turnAges(t);
+
+  const marker = sweepMarkerPair({ foldedIds: ['fold-001'], restoredIds: [], activeFolds: 1 });
+  const withMarker = [...t.slice(0, 4), ...marker, ...t.slice(4)];
+  const ages = turnAges(withMarker);
+
+  // ages of the original messages (now shifted by 2 after index 4) are unchanged
+  expect(ages.slice(0, 4)).toEqual(withoutMarker.slice(0, 4));
+  expect(ages.slice(6)).toEqual(withoutMarker.slice(4));
+  // the marker's own two synthetic messages inherit the age of the turn they sit in
+  expect(ages[4]).toBe(ages[3]);
+  expect(ages[5]).toBe(ages[3]);
 });

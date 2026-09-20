@@ -1,5 +1,5 @@
 import type { Register, EngineInterface, SessionCompactInput, SessionCompactResult, SessionMessage } from 'claude-code';
-import { selectCandidates, rebuild, bannerText, stripBanner, applyBanner, foldIdsPresent, foldIndexMessage, type FoldDecision, type RestoreDecision, candidateMass, estimateTokens } from './rebuild';
+import { selectCandidates, rebuild, bannerText, stripBanner, applyBanner, foldIdsPresent, foldIndexMessage, sweepMarkerPair, BANNER_PREFIX, BANNER_ACK, type FoldDecision, type RestoreDecision, candidateMass, estimateTokens } from './rebuild';
 import { runLibrarian, type CompleteFn } from './librarian';
 import { newFoldId, putFold, getFold, setFold, allFolds, appendLog, inputKeyOf, type FoldEntry, type StoreIO } from './store';
 
@@ -132,8 +132,19 @@ export async function runSweep(
       : undefined;
   try {
     const io = await storeIO($);
-    // strip any existing banner pair first: all subsequent logic runs on the
-    // stripped array, never on e.messages directly
+    // v1.1 item 6 (banner split/idempotence): the banner is STATIC — written once,
+    // rules only. If index 0/1 already carry exactly today's banner text, keep those
+    // ORIGINAL message objects (same references, handles intact) at assembly time
+    // instead of rebuilding them; that is the prompt-cache win. Detected against the
+    // raw event messages, before stripping.
+    const currentBanner = bannerText(ORIGAMI_VERSION);
+    const bannerUnchanged = e.messages[0]?.role === 'user' && e.messages[0].text.startsWith(BANNER_PREFIX)
+      && e.messages[0].text === currentBanner
+      && e.messages[1]?.role === 'assistant' && e.messages[1].text === BANNER_ACK;
+    // strip any existing banner pair first: all subsequent logic (reconcile scan,
+    // candidate selection, restores, rebuild) runs on the stripped array, never on
+    // e.messages directly — this holds whether or not the banner is being kept,
+    // since rebuild() never touches the banner pair either way (no toolResults).
     const messages = stripBanner(e.messages);
     // --- lifecycle reconcile: a 'folded' entry whose stub no longer appears anywhere
     // in the transcript is dead (unpin->refold replaced it, the stub was edited away,
@@ -203,7 +214,18 @@ export async function runSweep(
     await io.storeSet(LAST_SKIP_MASS, 0);
     await io.storeSet(AGGRESSIVE, false);
     const activeFolds = (await allFolds(io)).filter(f => f.state === 'folded').length;
-    const finalMessages = applyBanner(outcome.messages, bannerText(ORIGAMI_VERSION, activeFolds));
+    // Reuse the original banner pair (same object references) when its text is
+    // already current; otherwise rebuild it (migration bust: old-style count-bearing
+    // banner, or a version bump). Either way, append this sweep's marker pair at the
+    // tail — the mutable status that used to live in the banner's count.
+    const marker = sweepMarkerPair({
+      foldedIds: foldDecisions.map(d => d.foldId),
+      restoredIds: restores.map(r => r.foldId),
+      activeFolds,
+    });
+    const finalMessages = bannerUnchanged
+      ? [e.messages[0], e.messages[1], ...outcome.messages, ...marker]
+      : [...applyBanner(outcome.messages, currentBanner), ...marker];
     await appendLog(io, {
       event: 'sweep', trigger: e.trigger, aggressive,
       tokensBefore: outcome.tokensBefore, tokensAfter: outcome.tokensAfter,

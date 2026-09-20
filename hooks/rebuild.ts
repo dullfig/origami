@@ -7,11 +7,16 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
+// The synthetic sweep-marker user message's fixed text prefix (v1.1 item 6). Shared
+// by sweepMarkerPair (which writes it) and turnAges (which must not count it as a
+// turn start — it is inserted between real turns, not spoken by the user).
+export const MARKER_PREFIX = '[origami sweep report:';
+
 export function turnAges(messages: readonly SessionMessage[]): number[] {
   const turnOf: number[] = [];
   let turn = -1;
   for (const m of messages) {
-    if (m.role === 'user' && m.text.trim() !== '') turn += 1;
+    if (m.role === 'user' && m.text.trim() !== '' && !m.text.startsWith(MARKER_PREFIX)) turn += 1;
     turnOf.push(Math.max(turn, 0));
   }
   const newest = Math.max(turn, 0);
@@ -74,6 +79,12 @@ export function stubText(foldId: string, tool: string, stub: string): string {
 // Every fold id whose stub actually appears in the transcript (message text or a tool
 // result). Used to reconcile the fold index: an entry in state 'folded' whose stub is
 // gone no longer exists as far as the conversation is concerned.
+//
+// v1.1 item 6 verification: the pattern requires the literal stub prefix `[origami `
+// immediately followed by `fold-NNN` — a bare mention of a fold id elsewhere in text
+// (e.g. inside a sweepMarkerPair marker, which lists ids like "folded fold-013" without
+// the `[origami ` prefix directly before them) does NOT match. Confirmed with a test
+// (rebuild.test.ts) rather than changed: this was already the correct, tight matcher.
 export function foldIdsPresent(messages: readonly SessionMessage[]): Set<string> {
   const out = new Set<string>();
   const scan = (text: string) => {
@@ -84,6 +95,25 @@ export function foldIdsPresent(messages: readonly SessionMessage[]): Set<string>
     for (const r of m.toolResults ?? []) scan(r.text);
   }
   return out;
+}
+
+// --- Sweep marker (v1.1 item 6, banner split) ---
+// A small handle-less user+assistant pair appended at the tail of the rebuilt
+// messages on every SUCCESSFUL sweep. Unlike the banner (static, written once,
+// rules only), the marker is mutable status written fresh each sweep and left in
+// place forever after — historically true at its position in the transcript.
+//
+// CRITICAL: the text must never contain the substring `[origami fold-` (the stub
+// prefix) — fold ids are written bare so foldIdsPresent (which anchors on that
+// exact prefix) never mistakes a marker mention for a live stub.
+export function sweepMarkerPair(report: {
+  foldedIds: readonly string[]; restoredIds: readonly string[]; activeFolds: number;
+}): SessionMessage[] {
+  const text = `${MARKER_PREFIX} folded ${report.foldedIds.join(', ') || 'nothing'}; restored ${report.restoredIds.join(', ') || 'nothing'}; ${report.activeFolds} folds now active. Content discussed above this point may now render as stubs — hydrate to recover it.]`;
+  return [
+    { role: 'user', text, toolUses: [] },
+    { role: 'assistant', text: 'Noted. [synthetic acknowledgment inserted by origami]', toolUses: [] },
+  ];
 }
 
 // --- Fold-index insurance (spec addendum F10, `auto` row) ---
@@ -168,7 +198,11 @@ export function rebuild(
 
 export const BANNER_PREFIX = '[ORIGAMI v';
 
-export function bannerText(version: string, activeFolds: number): string {
+// v1.1 item 6 (banner split): STATIC — rules only, no fold count. Written once at
+// the first sweep and never rewritten afterward (the point: index 0/1 then keep
+// their handles and their place in the prompt cache across every later sweep).
+// The mutable status moved inline — see sweepMarkerPair.
+export function bannerText(version: string): string {
   return `[ORIGAMI v${version} — BETA. This session's older tool results have been FOLDED:
 replaced by short link-stubs written by a librarian that read the full
 content. The full content is intact on disk — nothing is lost.
@@ -187,7 +221,7 @@ content. The full content is intact on disk — nothing is lost.
   now shows only as a stub: the conversation is rewritten in place, and
   that content was fully visible when those messages were written. It is
   not a contradiction, and nobody misspoke.
-Currently ${activeFolds} folds active. (This notice is updated in place at each sweep.)]`;
+This notice is written once; per-sweep reports appear inline in the conversation below.]`;
 }
 
 export const BANNER_ACK = "Understood — I'll follow hydrate:// links before re-running tools or claiming I never saw something, and I'll flag anomalies to the user. [synthetic acknowledgment inserted by origami]";

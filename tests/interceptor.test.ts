@@ -1,8 +1,8 @@
 import { test, expect } from 'claude-code/testing';
-import { runSweep, storeIO, handleHydrate, observeMissedHydrate } from '../hooks/origami';
+import { runSweep, storeIO, handleHydrate, observeMissedHydrate, ORIGAMI_VERSION } from '../hooks/origami';
 import { readConfig } from '../hooks/origami';
 import { getFold, allFolds, putFold } from '../hooks/store';
-import { BANNER_PREFIX, BANNER_ACK, foldIndexMessage } from '../hooks/rebuild';
+import { BANNER_PREFIX, BANNER_ACK, bannerText, foldIndexMessage, MARKER_PREFIX } from '../hooks/rebuild';
 import { fakeEngine } from './fake-engine';
 import type { SessionMessage } from 'claude-code';
 
@@ -34,9 +34,20 @@ test('sweep folds the stale result, persists the fold, logs the sweep', async ()
   // banner pair prepended: index shift +2 from the brief's original assertions
   expect(r.messages[0].text.startsWith(BANNER_PREFIX)).toBe(true);
   expect(r.messages[0].handle).toBe(undefined);
+  // v1.1 item 6: the banner is now the STATIC text (no fold count baked in)
+  expect(r.messages[0].text).toBe(bannerText(ORIGAMI_VERSION));
   expect(r.messages[1].text).toBe(BANNER_ACK);
   expect(r.messages[1].handle).toBe(undefined);
   expect(r.messages[4].toolResults![0].text.includes('fold-001')).toBe(true);
+  // the mutable status lives at the tail as a sweep marker pair
+  const tail = r.messages.slice(-2);
+  expect(tail[0].role).toBe('user');
+  expect(tail[0].text.startsWith(MARKER_PREFIX)).toBe(true);
+  expect(tail[0].text).toContain('folded fold-001');
+  expect(tail[0].text).toContain('restored nothing');
+  expect(tail[0].text).toContain('1 folds now active');
+  expect(tail[1].role).toBe('assistant');
+  expect(tail[1].text).toBe('Noted. [synthetic acknowledgment inserted by origami]');
   const stored = await getFold(io, 'fold-001');
   expect(stored!.body).toBe('CONTENT '.repeat(2000));   // byte-exact: the header is not in the body
   expect(stored!.header!.includes('fold-001 · Read')).toBe(true);
@@ -62,7 +73,7 @@ test('librarian failure on plugin trigger yields skip; on manual yields pass-thr
 
 // --- finding 8(a): a second sweep over the first sweep's own output ---
 
-test('two sweeps: banner re-applied exactly once, existing stubs are not re-folded', async () => {
+test('two sweeps: banner kept by reference (idempotent), existing stubs are not re-folded, a second marker is appended', async () => {
   const fake = fakeEngine();
   const io = await storeIO(fake.$);
   fake.setModelComplete(foldEverything);
@@ -70,6 +81,7 @@ test('two sweeps: banner re-applied exactly once, existing stubs are not re-fold
   const first = await runSweep(fake.$, cfg, { trigger: 'plugin', messages: transcript() });
   if (!('messages' in first!) || !first.messages) throw new Error('expected a rebuilt first sweep');
   expect((await allFolds(io)).map(f => f.id)).toEqual(['fold-001']);
+  const firstMarker = first.messages.slice(-2); // [user marker, assistant ack] for fold-001
 
   // the conversation continues on top of the swept transcript: a new big result lands
   // and ages out of the protected window
@@ -84,12 +96,37 @@ test('two sweeps: banner re-applied exactly once, existing stubs are not re-fold
 
   const r = await runSweep(fake.$, cfg, { trigger: 'plugin', messages: second });
   if (!('messages' in r!) || !r.messages) throw new Error(`expected a rebuilt second sweep, got ${JSON.stringify(r)}`);
-  // exactly one banner, at the top, carrying the new count
+  // exactly one banner, at the top, text identical to the static banner (no count)
   const banners = r.messages.filter(m => m.role === 'user' && m.text.startsWith(BANNER_PREFIX));
   expect(banners.length).toBe(1);
   expect(r.messages[0].text.startsWith(BANNER_PREFIX)).toBe(true);
+  expect(r.messages[0].text).toBe(bannerText(ORIGAMI_VERSION));
   expect(r.messages[1].text).toBe(BANNER_ACK);
-  expect(r.messages[0].text).toContain('Currently 2 folds active.');
+  // KEY ASSERTION (v1.1 item 6, decision 2): the banner pair objects are the SAME
+  // references as the first sweep's — not rebuilt. The fake-engine test kit passes
+  // plain SessionMessage objects straight through (no wrapper/proxy), so reference
+  // (`toBe`) identity is directly observable and is the strongest available proof of
+  // handle preservation; a real handle field would show the same thing (both are
+  // `undefined` here since the banner is synthetic and never carried a handle).
+  expect(r.messages[0]).toBe(second[0]);
+  expect(r.messages[0]).toBe(first.messages[0]);
+  expect(r.messages[1]).toBe(second[1]);
+  expect(r.messages[1]).toBe(first.messages[1]);
+  // the first sweep's marker pair is untouched (same objects) — it sits mid-transcript
+  // now, and is carried through by rebuild()'s "not touched -> same reference" path
+  const firstMarkerIndexInR = r.messages.findIndex(m => m === firstMarker[0]);
+  expect(firstMarkerIndexInR).toBeGreaterThan(1); // present, after the banner pair
+  expect(r.messages[firstMarkerIndexInR]).toBe(firstMarker[0]);
+  expect(r.messages[firstMarkerIndexInR + 1]).toBe(firstMarker[1]);
+  expect(r.messages[firstMarkerIndexInR].text).toContain('folded fold-001');
+  // a second marker pair is appended at the tail, reporting this sweep's fold
+  const secondMarker = r.messages.slice(-2);
+  expect(secondMarker[0].role).toBe('user');
+  expect(secondMarker[0].text.startsWith(MARKER_PREFIX)).toBe(true);
+  expect(secondMarker[0].text).toContain('folded fold-002');
+  expect(secondMarker[0].text).toContain('restored nothing');
+  expect(secondMarker[0].text).toContain('2 folds now active');
+  expect(secondMarker[1].text).toBe('Noted. [synthetic acknowledgment inserted by origami]');
   // the first sweep's stub is carried through untouched, never re-folded
   const stubs = r.messages.flatMap(m => m.toolResults ?? []).filter(x => x.text.startsWith('[origami '));
   expect(stubs.length).toBe(2);
@@ -118,7 +155,10 @@ test('a folded entry whose stub has vanished is evicted, not counted, not matche
   if (!('messages' in r!) || !r.messages) throw new Error('expected a rebuilt sweep');
   const dead = (await allFolds(io)).find(f => f.id === 'fold-000')!;
   expect(dead.state).toBe('evicted');
-  expect(r.messages[0].text).toContain('Currently 1 folds active.');   // only the live fold counts
+  // only the live fold counts — now reported by the tail marker, not the (static) banner
+  const tail = r.messages.slice(-2);
+  expect(tail[0].text.startsWith(MARKER_PREFIX)).toBe(true);
+  expect(tail[0].text).toContain('1 folds now active');
   // the observer no longer reports a re-read of it as a missed hydrate
   await observeMissedHydrate(fake.$, { tool: 'Read', input: { file_path: 'gone.ts' } });
   const log = String(await fake.$.fs.read('.claude/origami/origami.log'));

@@ -162,18 +162,33 @@ Its body stays on disk, so `hydrate` still serves it and says so.
 
 ## The status banner
 
-On every successful sweep, Origami prepends a synthetic message pair to the
-very top of the context: a user-role message starting `[ORIGAMI v…` that
+On the first successful sweep, Origami prepends a synthetic message pair to
+the very top of the context: a user-role message starting `[ORIGAMI v…` that
 states the plugin is in beta, explains how to follow `hydrate://` links and
 call `hydrate` before re-running a tool or concluding content was never
-seen, assigns a "BETA DUTY" to explicitly flag to the user anything that
-looks like a stub/reality mismatch or an unlocatable reference, and reports
-the current count of active folds — followed by a synthetic assistant
-acknowledgment.
+seen, and assigns a "BETA DUTY" to explicitly flag to the user anything that
+looks like a stub/reality mismatch or an unlocatable reference — followed by
+a synthetic assistant acknowledgment.
 
-This pair is not part of the real conversation: it is rebuilt from scratch
-on every sweep (the previous banner is stripped before a fresh one is
-applied), and the acknowledgment is explicitly provenance-labeled, ending
+This banner is **static**: it carries rules only, never a fold count, and is
+written once. Every later sweep leaves it untouched — the same message
+objects, handles intact — as long as its text still matches the current
+version's wording, which is a deliberate prompt-cache win (index 0/1 would
+otherwise be rewritten, and the cache busted from token zero, on every
+sweep). If the wording no longer matches (a version bump, or migrating from
+an older count-carrying banner), it is rebuilt exactly once.
+
+The mutable status lives inline instead: every successful sweep appends a
+small synthetic marker pair — a user-role message starting
+`[origami sweep report: folded …; restored …; N folds now active. …]` plus a
+tiny assistant acknowledgment — at the tail of the rebuilt messages. Each
+marker is historically true at its position in the transcript forever,
+giving the model an explicit timeline boundary between "content visible"
+and "content stubbed" at that point in the conversation. Multiple sweeps
+leave a trail of markers.
+
+Neither pair is part of the real conversation, and every synthetic
+acknowledgment is explicitly provenance-labeled, ending
 `[synthetic acknowledgment inserted by origami]`, so it is never mistaken
 for something the model actually said.
 

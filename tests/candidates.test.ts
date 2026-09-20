@@ -1,5 +1,5 @@
 import { test, expect } from 'claude-code/testing';
-import { estimateTokens, turnAges, selectCandidates, candidateMass } from '../hooks/rebuild';
+import { estimateTokens, turnAges, selectCandidates, candidateMass, sweepMarkerPair } from '../hooks/rebuild';
 import { readConfig } from '../hooks/origami';
 import type { SessionMessage } from 'claude-code';
 
@@ -61,4 +61,19 @@ test('small results are never candidates', async () => {
   const t = transcript();
   t[4] = msg({ role: 'user', toolResults: [{ tool_use_id: 't1', text: 'ok', isError: false }] });
   expect(selectCandidates(t, new Set(), cfg, false).length).toBe(0);
+});
+
+// v1.1 item 6, decision 6: markers/acks carry no toolResults, so they can never be
+// folded — selectCandidates ignores them by construction (it only scans toolResults),
+// and their small text does not disturb the mass accounting elsewhere.
+test('a sweep marker pair yields no fold candidate, old as it may become', async () => {
+  const t = transcript();
+  const marker = sweepMarkerPair({ foldedIds: ['fold-001'], restoredIds: [], activeFolds: 1 });
+  const withMarker = [...t, ...marker, msg({ role: 'user', text: 'turn5 prompt' }), msg({ role: 'assistant', text: 'reply5' })];
+  const before = selectCandidates(t, new Set(), cfg, false);
+  const after = selectCandidates(withMarker, new Set(), cfg, false);
+  // the real candidate (t1) is still found, unaffected by the marker's presence
+  expect(after.map(c => c.toolUseId)).toEqual(before.map(c => c.toolUseId));
+  // and no candidate is ever produced for the marker's own two messages
+  expect(after.some(c => c.text.startsWith('[origami sweep report:'))).toBe(false);
 });

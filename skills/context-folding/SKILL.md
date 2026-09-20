@@ -32,6 +32,10 @@ concept pulled you back.
    relevant, call `unpin(fold_id)` so the context stays lean.
 5. Do not quote a stub as if it were the content. If the stub is not enough
    to answer precisely, hydrate first.
-6. The `[ORIGAMI v…]` banner at the top is the plugin's own status notice;
-   its acknowledgment is synthetic (inserted by origami, labeled as such),
-   not something you actually said.
+6. The `[ORIGAMI v…]` banner at the top is the plugin's own status notice
+   (static rules, written once); its acknowledgment is synthetic (inserted
+   by origami, labeled as such), not something you actually said.
+7. A `[origami sweep report: …]` message is a synthetic marker Origami
+   inserts inline after each sweep, reporting what was folded/restored and
+   how many folds are active at that point in the conversation. Its
+   acknowledgment is synthetic too — same labeling as the banner's.
