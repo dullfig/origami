@@ -45,7 +45,7 @@ function completeWith($: EngineInterface): CompleteFn {
 }
 
 // Keep in sync with .claude-plugin/plugin.json's "version".
-export const ORIGAMI_VERSION = '1.0.1';
+export const ORIGAMI_VERSION = '1.0.2';
 
 export type OrigamiConfig = {
   foldAgeTurns: number;
@@ -130,8 +130,18 @@ export async function runSweep(
     e.trigger === 'manual' && liveFolds.length > 0
       ? { skip: `origami: nothing to fold — ${liveFolds.length} live folds already active; stock compaction would destroy their stubs` }
       : undefined;
+  // Hoisted OUTSIDE the try for the same reason as liveFolds: the catch path needs
+  // them too. `io` is normally built at the top of the try, but a throw can happen
+  // before that assignment runs (or the try itself could fail differently later), so
+  // it is declared here and assigned as soon as it exists. `sweepCandidateMass` is
+  // set once candidates are selected; if the librarian call (or anything after it)
+  // then throws, the catch block still has the mass to arm the skip-mass cooldown —
+  // without this, a failing sweep re-fires the trigger and re-pays a full librarian
+  // call every turn instead of backing off like the explicit skip outcomes do.
+  let io: StoreIO | undefined;
+  let sweepCandidateMass = 0;
   try {
-    const io = await storeIO($);
+    io = await storeIO($);
     // v1.1 item 6 (banner split/idempotence): the banner is STATIC — written once,
     // rules only. If index 0/1 already carry exactly today's banner text, keep those
     // ORIGINAL message objects (same references, handles intact) at assembly time
@@ -163,6 +173,7 @@ export async function runSweep(
     const aggressive = Boolean(await io.storeGet(AGGRESSIVE));
     const candidates = selectCandidates(messages, excluded, cfg, aggressive)
       .filter(c => !c.text.startsWith('[origami fold-'));  // never re-fold a stub
+    sweepCandidateMass = candidateMass(candidates);
     // reopen pinned folds whose stubs still sit in history
     const restores: RestoreDecision[] = [];
     for (const f of folds.filter(f => f.state === 'pinned')) {
@@ -181,7 +192,7 @@ export async function runSweep(
     }
     const lib = candidates.length > 0
       ? await runLibrarian(completeWith($), cfg.librarianModel, candidates, aggressive)
-      : { decisions: [], inputTokens: 0, outputTokens: 0 };
+      : { decisions: [], defaulted: [], inputTokens: 0, outputTokens: 0 };
     // Ids are allocated and bodies BUFFERED here; nothing is persisted until rebuild
     // has cleared the reduction gate. Persisting first left orphan entries + body
     // files behind on every skipped sweep, inflating the banner count and feeding
@@ -230,11 +241,19 @@ export async function runSweep(
       event: 'sweep', trigger: e.trigger, aggressive,
       tokensBefore: outcome.tokensBefore, tokensAfter: outcome.tokensAfter,
       librarianInputTokens: lib.inputTokens, librarianOutputTokens: lib.outputTokens,
+      ...(lib.defaulted.length > 0 ? { librarianDefaulted: lib.defaulted.length } : {}),
       foldsCreated: foldDecisions.length, restores: restores.length, foldsActive: activeFolds,
     });
     return { messages: finalMessages, tokensBefore: outcome.tokensBefore, tokensAfter: outcome.tokensAfter };
   } catch (err) {
     $.ui.log(`origami sweep failed, falling back: ${err instanceof Error ? err.message : String(err)}`);
+    // Arm the same skip-mass cooldown a clean skip would: without it, a sweep that
+    // fails (librarian down, transient model error) re-fires the trigger and re-pays
+    // a full librarian call on every subsequent turn instead of backing off. Guarded
+    // in its own try/catch so a store failure here can never mask the original error.
+    if (io && sweepCandidateMass > 0) {
+      try { await io.storeSet(LAST_SKIP_MASS, sweepCandidateMass); } catch { /* best-effort */ }
+    }
     if (e.trigger === 'plugin') return { skip: 'origami: sweep failed' };
     return manualGuard();   // a failed sweep is still no reason to let stock wipe live stubs
   }
