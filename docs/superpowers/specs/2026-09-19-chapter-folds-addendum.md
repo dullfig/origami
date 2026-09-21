@@ -338,3 +338,36 @@ Caveats (edges, not blockers):
 
 The librarian was never a compaction-time batch process racing a 20s deadline;
 it is a per-block, as-you-go annotator with all the time in the world.
+
+### v1.2 fold lifecycle: born -> hot -> cold (Dan, 2026-09-20 21:35)
+
+A tool result has a lifecycle, and folding should track it:
+- BORN (post-tool-call): haiku writes the stub, a fold id is reserved in the
+  store (tool_use_id -> fold_id), but the result stays FULL in context —
+  nothing folds. Keep the id INTERNAL (do not inject it into the fresh result
+  the model is about to reason over; reveal it only at fold time).
+- HOT (this turn): the main model reads the full result, reasons over it, and
+  emits its response — which lands in the transcript as the model's OWN
+  untouched words.
+- COLD (aged past foldAgeTurns — NOT one turn; a result is often referenced
+  across several follow-up turns): origami swaps the raw result for the
+  pre-written stub. Instant, because the stub was ready at birth.
+
+This needs NO new machinery — "fold when cold" is exactly what foldAgeTurns
+already does. The contribution is the PRINCIPLE behind the age gate: a result
+is hot while the model is still reasoning over it, cold once that reasoning is
+captured in the transcript. Fold the cold ones.
+
+THE REFRAMING (the centerpiece): the model's own response IS the summary that
+matters, and it is already lossless in the transcript. Therefore the stub is
+NOT a summary of the tool result — it is a RETRIEVAL HANDLE. Its only job is
+to be good enough for the model to decide "do I need to pull the raw evidence
+back?" Clean division:
+  - Transcript = the durable CONCLUSION (the model's reasoning; never folded).
+  - Fold store = the recoverable EVIDENCE (the raw bytes; folded, hydratable).
+This downgrades haiku's role once more: a retrieval handle barely needs
+intelligence (`Read src/gateway.ts (480 lines)` is already a fine handle,
+because the model's own prior response said what it concluded from that file).
+haiku's concept-anchors are polish on a pointer, not a load-bearing summary.
+Origami was never in the summarizing business — the model summarizes itself,
+every turn, for free. Origami is in the EVIDENCE-RETRIEVAL business.
