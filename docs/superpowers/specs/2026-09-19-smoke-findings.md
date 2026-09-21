@@ -272,3 +272,17 @@ denied a compound git command in the same window.
   live folds → skip).
 - F11 one-liner alongside it.
 - F8/F9 banner + notice wording tweaks (small, post-merge acceptable).
+
+**F15 (platform floor, measured 2026-09-20 via a no-op plugin): Claude Code's
+compaction machinery costs ~3ms; the entire sweep cost is the librarian
+round-trip.** A minimal plugin that claims `session.compact` and returns the
+messages unchanged (zero model work) settled the dispatch in 3.0ms (debug:
+"session.compact ... settled in 3.0ms (worker hop, next() included)"), and the
+engine logged "a hook's messages stand ... core never ran" — empirically
+confirming that a hook returning a result BLOCKS the stock summarizer. Total
+`/compact` wall-clock was 2.3s, dominated by `claude -p` process startup; the
+compaction itself is 3ms. Consequence: platform overhead is negligible, so
+every second of a real sweep is haiku prefill+generation. This is the
+motivation for the v1.2 mechanical-fold pivot (chapter-folds addendum): if the
+fold is a structural transform needing no LLM, the critical path drops from
+~20s to ~3ms and the librarian becomes a background stub-beautifier.

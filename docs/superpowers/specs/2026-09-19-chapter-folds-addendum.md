@@ -243,3 +243,49 @@ Open questions for the v2 implementation:
 - Whether chapter stubs occupy a user or assistant slot (role alternation).
 - Interaction with the engine's own precompute-compaction trigger.
 - Whether pinned tool-folds inside a folded chapter fold with it or stay out.
+
+## v1.2 architectural pivot: mechanical fold, optional async enrichment (Dan, 2026-09-20 21:25)
+
+The 3ms platform-floor test (F15 in smoke-findings) proved the ENTIRE sweep
+cost is one blocking haiku round-trip; the machinery is 3ms. But a tool
+result is ALREADY a clean, self-delimited block — the engine gives it a
+tool_use_id, tool, input, and text. The fold UNIT is structural, not
+discovered by intelligence. So haiku is needed neither to IDENTIFY what to
+fold (selectCandidates ranks by age x mass from structure) nor to FOLD it (a
+fold is a pure transform: replace the result's text with a stub, keep the
+tool_use_id pairing). haiku's ONLY job is the anchor-text hyperlinks.
+
+Split the pipeline:
+- FOLD = synchronous, deterministic, LLM-FREE. Emit a mechanical stub from
+  the tool call's own metadata:
+  `[origami fold-041 · Read src/gateway.ts (480 lines, ~19k tokens) — hydrate to recover]`
+  The tool+input IS a free structural anchor (Read -> path, Bash -> command,
+  Grep -> pattern) — usually enough to decide whether to hydrate. 3ms, no
+  round-trip, cannot fail.
+- HYPERLINKS = optional async enrichment. haiku, in the background (or lazily
+  on first hydrate), reads the folded body and upgrades the stub with
+  content concept-anchors. Never blocks, never load-bearing; correctness
+  never depends on it (hydrate returns exact bytes regardless of stub
+  quality).
+
+This inverts origami from LLM-GATED folding to STRUCTURAL folding with
+optional LLM polish, and dissolves every failure observed on 2026-09-20 at
+the source:
+- F14 classifier refusals: folding no longer calls haiku, so a security-dense
+  session folds instantly; refusals only skip the optional enrichment.
+- ~20s sweep latency: folding is 3ms.
+- Librarian parse fragility (omissions -> 1.0.2, unknown-id typos -> 1.0.3,
+  batch refusals -> 1.0.5): ALL were about parsing haiku's FOLD DECISIONS.
+  haiku no longer makes fold decisions, so there is nothing to parse, omit,
+  or mistype — three releases of defensive code become unnecessary.
+
+Delta sweeps, the tally (item 8), precompute, refusal backoff (item 11), the
+framing preamble (item 9), and chapter folds (v2) all remain valuable — but
+as optimizations of a BACKGROUND enrichment process, not the critical path.
+The critical path becomes: structural fold, instant.
+
+Ship path: a mechanical-stub mode (no librarian on the fold path) could ship
+as the DEFAULT, with anchor-text enrichment as an async upgrade — origami
+that works with ZERO LLM calls on the critical path and gets prettier over
+time. The librarian invariant ("sees full content") still holds for
+enrichment; the fold simply no longer waits on it.
