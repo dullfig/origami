@@ -141,6 +141,22 @@ guard message — the same command that had wiped the prior session):
    stubbed". Role alternation via the proven user+ack pair. Multiple sweeps
    leave a trail of markers.
 
+7. **Index-based candidate ids (incident fix follow-up, 2026-09-20 — design
+   note only, not yet implemented):** the live-sweep incident (`librarian
+   reply names unknown id toolu_01Efn…`, fixed in 1.0.3 by dropping unknown
+   ids instead of throwing) traces to the librarian transcribing raw
+   `tool_use_id` strings — with ~70 candidates it copies ~70 long random ids,
+   and one mistyped character produces an "unknown" (the garbled copy) paired
+   with a "missing" (its intended twin, now unanswered). Rather than only
+   tolerating that class, eliminate it at the source: `buildSweepPrompt`
+   numbers candidates `1..N` in the prompt instead of printing their
+   `tool_use_id`, and `parseSweepReply` parses the small integer the reply
+   names and maps it back to the corresponding `toolUseId` positionally (by
+   index into the same candidates array the prompt was built from). Small
+   integers are far cheaper for the model to reproduce exactly than long
+   random ids, so both the omission-typo and the unknown-typo classes shrink
+   at the root instead of being caught and defaulted after the fact.
+
 ## v2+ sketch: Marian, the decision genealogist (Dan, 2026-09-19 22:01)
 
 With a permanent transcript (cleanupPeriodDays now archival) and chapter
