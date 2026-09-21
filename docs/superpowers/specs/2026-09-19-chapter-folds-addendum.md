@@ -289,3 +289,42 @@ as the DEFAULT, with anchor-text enrichment as an async upgrade — origami
 that works with ZERO LLM calls on the critical path and gets prettier over
 time. The librarian invariant ("sees full content") still holds for
 enrichment; the fold simply no longer waits on it.
+
+### v1.2 delivery: enrich at tool.call time, per block (Dan, 2026-09-20 21:29)
+
+The mechanical-fold pivot moves the librarian OFF compaction; this is WHERE it
+goes: the `tool.call` observer (main thread), at the moment each
+candidate-eligible result is born. At that instant haiku gets the
+best-possible input it will ever have — exactly ONE clean block, in isolation,
+no batching, no candidate set, no expectedIds to transcribe, no decision-to-id
+matching. It writes that one block's anchor-text stub, cached by tool_use_id.
+
+Result: compaction is pure mechanical lookup — for each result to fold, grab
+its pre-written stub (or fall back to the free structural stub if enrichment
+has not finished), swap it in. ~3ms, ZERO librarian calls at compaction. The
+enrichment cost spreads across the session's natural rhythm (one cheap call
+per big result, off the critical path) instead of spiking at compaction.
+
+This DISSOLVES the failure modes rather than moving them:
+- F14 refusals: one block, off-path — a refusal is a quality miss on a single
+  stub (falls back to structural), never a sweep failure, never latency.
+- 1.0.2/1.0.3/1.0.5 parse fragility (omissions, unknown-id typos, batch
+  rejections): all were about parsing haiku's answer over a SET. One block =
+  one stub = no set. Gone.
+- The librarian invariant ("sees full content") is trivially satisfied — the
+  single result, alone, the instant it exists.
+
+Caveats (edges, not blockers):
+1. Eager waste: enriching at birth spends haiku on results that may never fold
+   (session ends, or the result is hydrated/pinned/deleted). Mitigate with a
+   size/likelihood gate, or enrich slightly lazily (at foldAgeTurns crossing,
+   not birth). "Post tool use" is the eager end of a dial.
+2. Async mechanism: fire-and-forget from the observer is cleanest but needs a
+   declarations check — does the engine let an un-awaited hook promise outlive
+   the hook? If not: a synchronous enqueue in the observer + a drain step (on
+   turn.complete or a clock tick) processes the queue in the background.
+3. Awaiting in-observer (simplest impl) adds ~1-2s per big tool result;
+   acceptable but fire-and-forget / drained-queue is nicer.
+
+The librarian was never a compaction-time batch process racing a 20s deadline;
+it is a per-block, as-you-go annotator with all the time in the world.
