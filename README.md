@@ -68,17 +68,30 @@ compaction — the session is never left worse off than stock behavior.
 
 ## Installation
 
-Prerequisites: Claude Code >= 2.1.259, run with function hooks enabled:
+Prerequisites: Claude Code >= 2.1.259, run with function hooks enabled.
+Either export the flag in your shell:
 
 ```bash
 export CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1
 ```
 
-<!-- TODO(smoke): verify marketplace syntax -->
-```bash
-claude plugin marketplace add dullfig/origami
-claude plugin install origami@origami
+or set it once for every session (including the desktop app) in
+`~/.claude/settings.json`:
+
+```json
+{ "env": { "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1" } }
 ```
+
+Origami is listed in the [dullfig-plugins](https://github.com/dullfig/claude-plugins)
+marketplace:
+
+```bash
+claude plugin marketplace add dullfig/claude-plugins
+claude plugin install origami@dullfig-plugins
+```
+
+or interactively: `/plugins` → dullfig-plugins → origami. To try it from a
+checkout without installing, launch with `--plugin-dir /path/to/origami`.
 
 Nothing else is required: no Node/Python dependencies, no API key, no
 separate server process — the whole plugin is one TypeScript function-hooks
