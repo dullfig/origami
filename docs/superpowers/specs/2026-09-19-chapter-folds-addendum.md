@@ -371,3 +371,27 @@ because the model's own prior response said what it concluded from that file).
 haiku's concept-anchors are polish on a pointer, not a load-bearing summary.
 Origami was never in the summarizing business — the model summarizes itself,
 every turn, for free. Origami is in the EVIDENCE-RETRIEVAL business.
+
+### The real test bed: C:\src\agentos (Dan, 2026-09-20 21:44)
+
+A pure Rust library with hundreds of tests is the INVERSE of the build
+session that couldn't measure origami: tool-heavy (cargo output + file reads
+are the bulk — what v1 folds), not security-dense (no F14 refusals), clean
+cargo blocks. Delta sweeps finally get measured here. And it is the MAXIMAL
+stress for "fold evidence, keep conclusions": debugging constantly reaches
+BACK into evidence (correlate a failure now with an error 20 turns ago),
+unlike a design chat whose conclusions are self-contained. If folding
+survives debugging hundreds of tests, it survives anything.
+
+Edge it will expose — the boundary of the retrieval-handle reframing:
+REPEATED identical tool calls break the "dumb handle is enough" claim. Five
+`cargo test` runs produce five stubs with IDENTICAL tool+input metadata — the
+handle can't disambiguate WHICH run to hydrate. This is exactly where haiku's
+content-anchors earn their keep (`run 3: auth::refresh_token failed, +2`) and
+where the handle needs a disambiguator (turn number, timestamp, or a
+diff-from-last-run). So: metadata handle suffices for DISTINCT calls, degrades
+for REPEATED ones. Watch whether the model hydrates the RIGHT cargo run.
+Instruments to watch on the agentos run: missed_hydrate log entries (model
+re-running cargo instead of hydrating = the quantified degradation signal),
+sweep records (delta-sweep sizes shrinking as keep-memory warms), and whether
+debugging stays sharp across folds.
