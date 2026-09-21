@@ -174,6 +174,20 @@ guard message — the same command that had wiped the prior session):
    ("unjudged mass since the last sweep") rather than an approximation of
    it. Composes with keep-memory (item in the 1.0.4 perf pass): tally as
    cheap pre-gate, keep-aware scan as the exact check.
+9. **Librarian framing preamble (smoke finding F14, 2026-09-20 — design
+   note, not yet implemented):** compaction decontextualizes. The librarian
+   re-submits the extracted candidate content to haiku as a bare
+   summarization prompt, stripped of the conversational arc that made
+   security-adjacent material benign — which live-tripped Fable's dual-use
+   safety gating on a long security-heavy session (F14). `buildSweepPrompt`
+   should open with a framing preamble establishing the legitimate frame the
+   extraction removed: the librarian is summarizing tool output from an
+   authorized development/context-management task, not generating or acting
+   on the content. This restores context, not suppresses a signal — it does
+   not weaken any real safety property. Pairs with the existing fallback
+   matrix, which already treats a `$.model.complete` classifier refusal as
+   an ordinary librarian failure (skip + cooldown), so the preamble reduces
+   spurious refusals rather than being load-bearing for correctness.
 
 ## v2+ sketch: Marian, the decision genealogist (Dan, 2026-09-19 22:01)
 

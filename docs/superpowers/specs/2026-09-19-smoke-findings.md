@@ -236,6 +236,36 @@ resume) exists precisely because the originals endure — resume semantics for
 a folded session (does interactive --resume boot folded?) remain the one
 untested cell.
 
+**F14 (safety surface, observed live 2026-09-20 on THIS dev session — novel):
+compaction is a decontextualizing event that can trip dual-use safety
+gating.** During a sweep of a long, security-adjacent session (prompt-injection
+discussion, the system prompt's own C2/credential/exploit vocabulary, an
+`autoMode` config dense with prod/secrets/credential keywords, an
+"how would you fabricate a fake past" thread), the main model was gated and
+the harness SWITCHED it from Claude Fable 5 to Opus 4.8 mid-conversation
+(Fable carries extra dual-use safety measures Opus does not — stated in its
+system prompt). A second layer (the auto-mode Bash classifier) separately
+denied a compound git command in the same window.
+  - Mechanism (hypothesis, strongly fits): the librarian re-submits ~100k
+    tokens of the spiciest tool-results to haiku as a BARE summarization
+    prompt, stripped of the surrounding conversational arc that made them
+    benign. A long legitimate session accretes exculpatory context the
+    safety layer reads as a whole; extraction throws that context away, so
+    the classifier sees a context-free blob of flagged terms. The librarian
+    honors its "sees full content" invariant while the CLASSIFIER sees
+    decontextualized spice. Compaction is therefore a safety-surface event:
+    re-projecting context re-submits content to classifiers without the
+    frame that legitimized it.
+  - Not an origami bug: a `$.model.complete` refusal is just another
+    librarian failure the fallback matrix already catches — but it explains
+    why content-heavy sweeps on security-adjacent sessions may fail where
+    the code is flawless, and why a sweep can coincide with a model switch.
+  - Design response (v1.1 item 9 in the addendum): a framing preamble on the
+    librarian prompt restoring the exculpatory frame ("you are summarizing
+    tool output from an authorized development session for context
+    management"). Does not weaken any real safety property — it restores
+    context the extraction removed, rather than suppressing a signal.
+
 ## Remaining before/after merge
 
 - Dan's ruling on F10's fallback-matrix change (manual + nothing-to-fold +
