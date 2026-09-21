@@ -156,6 +156,24 @@ guard message — the same command that had wiped the prior session):
    integers are far cheaper for the model to reproduce exactly than long
    random ids, so both the omission-typo and the unknown-typo classes shrink
    at the root instead of being caught and defaulted after the fact.
+8. **Running tool-result tally as the trigger's first tier (Dan, 2026-09-20
+   20:23 — design note, not yet implemented):** only tool results fold, so
+   the trigger does not need to rescan the whole transcript every turn.
+   The existing `tool.call` observer middleware (main thread only) measures
+   each result's estimated tokens as it is born and accumulates a
+   since-last-sweep tally in the store (candidate-eligible results only,
+   >= 256 tokens; subagent calls excluded). `turn.complete` then compares
+   the tally — O(1) forever, however long the session — and runs today's
+   full scan only as CONFIRMATION when the tally suggests the threshold is
+   crossed, with a small backoff so a high tally whose results have not yet
+   aged past foldAgeTurns does not re-trigger the confirmation scan every
+   turn. A successful sweep resets the tally. Beyond cost: counting events
+   at birth is VIEW-INDEPENDENT — it decouples the trigger from
+   `$.session.messages()` raw-vs-live semantics (the F2 family's root), and
+   in the delta-sweep world the tally IS the quantity that matters
+   ("unjudged mass since the last sweep") rather than an approximation of
+   it. Composes with keep-memory (item in the 1.0.4 perf pass): tally as
+   cheap pre-gate, keep-aware scan as the exact check.
 
 ## v2+ sketch: Marian, the decision genealogist (Dan, 2026-09-19 22:01)
 
