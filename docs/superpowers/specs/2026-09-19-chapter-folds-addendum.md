@@ -315,10 +315,20 @@ This DISSOLVES the failure modes rather than moving them:
   single result, alone, the instant it exists.
 
 Caveats (edges, not blockers):
-1. Eager waste: enriching at birth spends haiku on results that may never fold
-   (session ends, or the result is hydrated/pinned/deleted). Mitigate with a
-   size/likelihood gate, or enrich slightly lazily (at foldAgeTurns crossing,
-   not birth). "Post tool use" is the eager end of a dial.
+1. Eager waste: enriching at birth spends haiku on results that may never fold.
+   ECONOMICS (Dan, 2026-09-20 21:31): haiku runs on the host credential
+   ($.model.complete, no API key), so on a fixed monthly plan the per-call
+   DOLLAR cost is ~zero — the strongest reason to gate disappears. Two softer
+   costs survive: (a) usage-limit budget (enrichment draws down the plan's
+   shared allowance, could bring forward the point the user's MAIN work
+   pauses on a limit), and (b) rate-limit contention (haiku shares the
+   account's rate limits with the main session; a burst could queue behind /
+   throttle the user's own turns — off-path scheduling softens this).
+   CONCLUSION: enrich EAGERLY by default (stubs always pre-computed); make the
+   gate an OPTIONAL knob for users who hit limits, not an architectural
+   necessity. Note the coupling: the host credential unifies cost (free), rate
+   (shared budget), and safety (F14 — the librarian trips the same classifier
+   the main turns would). One credential, one meter, one safety surface.
 2. Async mechanism: fire-and-forget from the observer is cleanest but needs a
    declarations check — does the engine let an un-awaited hook promise outlive
    the hook? If not: a synchronous enqueue in the observer + a drain step (on
