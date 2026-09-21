@@ -174,6 +174,29 @@ guard message — the same command that had wiped the prior session):
    ("unjudged mass since the last sweep") rather than an approximation of
    it. Composes with keep-memory (item in the 1.0.4 perf pass): tally as
    cheap pre-gate, keep-aware scan as the exact check.
+   HARD-GATE refinement (Dan, 2026-09-20 21:08): the strongest form is not a
+   threshold compare but a zero-gate — if ZERO candidate-eligible tool
+   results (>=256 tokens, non-subagent) were observed since the last sweep,
+   `turn.complete` returns immediately without scanning the transcript or
+   calling shouldSweep at all. Most turns in a conversation-heavy phase have
+   no new foldable tool output, so this makes them genuinely free (no scan,
+   no librarian). Note the SCOPE limit this session made vivid: it stops
+   origami's OWN wasted scans, but a talk-heavy session still grows via
+   conversation (which v1 cannot fold) until the ENGINE's stock
+   auto-compaction fires — that latency is the engine's, not origami's, and
+   only chapter folds (v2) removes it. The counter is the right efficiency
+   fix; chapter folds is the completeness fix.
+11. **Consecutive-refusal backoff (2026-09-20 21:04, from the live
+    security-dense session):** even 1.0.5's graceful batch-refusal
+    (allSettled → defaulted → skip) costs the librarian round-trip. On a
+    session whose content trips the safety classifier on every batch
+    (F14), sweeps keep re-paying that round-trip and folding nothing. After
+    N consecutive sweeps that fold nothing (all-defaulted / all-refused),
+    origami should back off exponentially (widen the effective cooldown)
+    rather than retry every trigger, so an unfoldable session stops
+    bleeding time. The librarian framing preamble (item 9) is the fix that
+    makes such sessions foldable in the first place; this backoff is the
+    cheap insurance for when it still refuses.
 9. **Librarian framing preamble (smoke finding F14, 2026-09-20 — design
    note, not yet implemented):** compaction decontextualizes. The librarian
    re-submits the extracted candidate content to haiku as a bare
