@@ -45,7 +45,7 @@ function completeWith($: EngineInterface): CompleteFn {
 }
 
 // Keep in sync with .claude-plugin/plugin.json's "version".
-export const ORIGAMI_VERSION = '1.0.0';
+export const ORIGAMI_VERSION = '1.0.1';
 
 export type OrigamiConfig = {
   foldAgeTurns: number;

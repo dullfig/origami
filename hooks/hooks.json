@@ -1,1 +1,17 @@
-{ "modules": ["./origami.ts"] }
+{
+  "modules": ["./origami.ts"],
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "bash",
+            "command": "if [ -n \"$CLAUDE_CODE_ENABLE_FUNCTION_HOOKS\" ]; then exit 0; fi; echo '{\"systemMessage\":\"origami is installed but function hooks are disabled, so context folding is inactive. Run /origami:enable once (it adds one env line to ~/.claude/settings.json), then restart Claude Code.\"}'"
+          }
+        ]
+      }
+    ]
+  }
+}
