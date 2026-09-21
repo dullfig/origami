@@ -46,7 +46,7 @@ function completeWith($: EngineInterface): CompleteFn {
 }
 
 // Keep in sync with .claude-plugin/plugin.json's "version".
-export const ORIGAMI_VERSION = '1.0.4';
+export const ORIGAMI_VERSION = '1.0.5';
 
 export type OrigamiConfig = {
   foldAgeTurns: number;
@@ -268,14 +268,21 @@ export async function runSweep(
     const lib = offered.length > 0
       ? await runLibrarian(completeWith($), cfg.librarianModel, offered, aggressive)
       : { decisions: [], defaulted: [], unknown: [], inputTokens: 0, outputTokens: 0 };
-    // Record the verdicts. A `keep` (explicit or defaulted — parseSweepReply makes
-    // both come back as action 'keep') is remembered against the content it was made
-    // about; a `fold` clears any entry, since the content is about to become a stub.
+    // Record the verdicts. Only an EXPLICIT keep — one the librarian actually judged —
+    // is remembered. A `defaulted` id was never judged at all: parseSweepReply falls
+    // back to 'keep' as a safety default for THIS sweep only (an omission, or a whole
+    // rejected batch — see runLibrarian), and memoizing it would turn that one-sweep
+    // fallback into a permanent suppression from every future non-aggressive sweep.
+    // Leaving no entry means the candidate is simply re-offered next sweep, giving the
+    // librarian another chance to judge it. A `fold` clears any entry, since the
+    // content is about to become a stub.
+    const defaultedIds = new Set(lib.defaulted);
     for (const d of lib.decisions) {
       const c = offered.find(x => x.toolUseId === d.toolUseId);
       if (!c) continue;
-      if (d.action === 'keep') await putKeep(io, d.toolUseId, contentHash(c.text));
-      else if (keeps.has(d.toolUseId)) await dropKeep(io, d.toolUseId);
+      if (d.action === 'keep') {
+        if (!defaultedIds.has(d.toolUseId)) await putKeep(io, d.toolUseId, contentHash(c.text));
+      } else if (keeps.has(d.toolUseId)) await dropKeep(io, d.toolUseId);
     }
     // Ids are allocated and bodies BUFFERED here; nothing is persisted until rebuild
     // has cleared the reduction gate. Persisting first left orphan entries + body

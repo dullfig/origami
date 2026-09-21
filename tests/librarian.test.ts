@@ -129,6 +129,42 @@ test('at or below the batch size there is exactly one call — unchanged single-
   expect(r.decisions.length).toBe(LIBRARIAN_BATCH_SIZE);
 });
 
+// F14: a batch's `complete` call can itself reject (e.g. a safety-classifier refusal
+// on security-dense content). Promise.all would let that one rejection discard every
+// sibling batch's successfully-parsed work and fail the whole call; runLibrarian must
+// instead degrade the rejected batch to "keep everything in it, defaulted" and still
+// return the good batch's real decisions.
+test('a batch whose complete() call rejects degrades to defaulted keeps without throwing, and the good batch still folds', async () => {
+  const complete = async (req: { prompt: string }) => {
+    const ids = [...req.prompt.matchAll(/<candidate id="([^"]+)"/g)].map(m => m[1]);
+    if (ids.includes('t15')) throw new Error('refused: safety classifier');
+    return ids.map(id => `<decision id="${id}" action="fold">stub ${id}.</decision>`).join('\n');
+  };
+  const candidates = manyCandidates(20);
+  const r = await runLibrarian(complete, 'haiku', candidates, false);
+  expect(r.decisions.length).toBe(20);
+  // batch 1 (t0..t14) folded normally
+  expect(r.decisions.filter(d => d.action === 'fold').map(d => d.toolUseId))
+    .toEqual(candidates.slice(0, 15).map(c => c.toolUseId));
+  // batch 2 (t15..t19), whose complete() rejected, is entirely defaulted to keep
+  expect(r.decisions.filter(d => d.action === 'keep').map(d => d.toolUseId))
+    .toEqual(['t15', 't16', 't17', 't18', 't19']);
+  expect(r.defaulted).toEqual(['t15', 't16', 't17', 't18', 't19']);
+  expect(r.unknown).toEqual([]);
+  // tokens are counted only over the fulfilled batch
+  expect(r.inputTokens > 0).toBe(true);
+  expect(r.outputTokens > 0).toBe(true);
+});
+
+test('all batches rejecting yields no decisions folded — everything defaulted, no throw', async () => {
+  const complete = async () => { throw new Error('model down'); };
+  const r = await runLibrarian(complete, 'haiku', manyCandidates(20), false);
+  expect(r.decisions.every(d => d.action === 'keep')).toBe(true);
+  expect(r.defaulted.length).toBe(20);
+  expect(r.inputTokens).toBe(0);
+  expect(r.outputTokens).toBe(0);
+});
+
 test('an unknown id in one batch is reported without disturbing the other batch', async () => {
   const complete = async (req: { prompt: string }) => {
     const ids = [...req.prompt.matchAll(/<candidate id="([^"]+)"/g)].map(m => m[1]);

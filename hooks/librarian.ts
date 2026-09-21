@@ -75,13 +75,30 @@ export async function runLibrarian(
   for (let i = 0; i < candidates.length; i += LIBRARIAN_BATCH_SIZE) {
     batches.push(candidates.slice(i, i + LIBRARIAN_BATCH_SIZE));
   }
-  const runs = await Promise.all(batches.map(async (batch) => {
+  const settled = await Promise.allSettled(batches.map(async (batch) => {
     const prompt = buildSweepPrompt(batch, aggressive);
     const maxTokens = Math.min(16384, 1024 + batch.length * 128);
     const reply = await complete({ model, prompt, maxTokens });
     const parsed = parseSweepReply(reply, batch.map(c => c.toolUseId));
     return { ...parsed, inputTokens: estimateTokens(prompt), outputTokens: estimateTokens(reply) };
   }));
+  // Promise.allSettled, not Promise.all: a batch's `complete` call CAN reject (a
+  // safety-classifier refusal on security-dense content is a real, observed failure
+  // mode), and with Promise.all that one rejection would discard every sibling batch's
+  // successfully-parsed work, failing the entire sweep. A rejected batch instead
+  // degrades exactly like an omitted reply would: every id it expected becomes
+  // `defaulted` (action 'keep', for this sweep only — see parseSweepReply above), so
+  // the sweep keeps that content inline and retries the batch whole next time. Tokens
+  // are counted only for fulfilled batches (a rejected one contributes 0 of each).
+  const runs = batches.map((batch, i) => {
+    const s = settled[i];
+    if (s.status === 'fulfilled') return s.value;
+    const ids = batch.map(c => c.toolUseId);
+    return {
+      decisions: ids.map(id => ({ toolUseId: id, action: 'keep' as const, stub: '' })),
+      defaulted: ids, unknown: [] as string[], inputTokens: 0, outputTokens: 0,
+    };
+  });
   // Batches are contiguous, in-order slices, so flattening restores the caller's own
   // candidate order — `decisions` stays aligned with `candidates` exactly as the
   // single-call path produced it.

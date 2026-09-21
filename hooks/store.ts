@@ -69,13 +69,15 @@ export async function allFolds(io: StoreIO): Promise<FoldEntry[]> {
 }
 
 // --- Keep-memory (delta sweeps) ---
-// A candidate the librarian ruled `keep` (explicitly, or by defaulting) stays inline,
-// aged and bulky, and would otherwise be re-offered wholesale on EVERY later sweep —
-// the observed ~100k-token, ~30s prefill that reads the same content twice running.
-// Remembering the verdict, keyed by the tool_use_id and fingerprinted by the content
-// hash, makes steady-state sweeps read only NEW mass. The hash is what makes the
-// memory safe: if the same id ever carries different text, the verdict no longer
-// applies and the candidate is offered again.
+// A candidate the librarian EXPLICITLY ruled `keep` stays inline, aged and bulky, and
+// would otherwise be re-offered wholesale on EVERY later sweep — the observed
+// ~100k-token, ~30s prefill that reads the same content twice running. Remembering the
+// verdict, keyed by the tool_use_id and fingerprinted by the content hash, makes
+// steady-state sweeps read only NEW mass. The hash is what makes the memory safe: if
+// the same id ever carries different text, the verdict no longer applies and the
+// candidate is offered again. A DEFAULTED keep (the librarian never actually judged
+// it — an omission, or a whole batch whose call failed) is never written here: it must
+// stay retryable, not become a permanent suppression (see origami.ts's recording loop).
 export type KeepEntry = { hash: string; ts: string };
 
 const KEEP_PREFIX = 'origami:keep:';
