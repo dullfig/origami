@@ -45,7 +45,7 @@ function completeWith($: EngineInterface): CompleteFn {
 }
 
 // Keep in sync with .claude-plugin/plugin.json's "version".
-export const ORIGAMI_VERSION = '1.0.2';
+export const ORIGAMI_VERSION = '1.0.3';
 
 export type OrigamiConfig = {
   foldAgeTurns: number;
@@ -192,7 +192,7 @@ export async function runSweep(
     }
     const lib = candidates.length > 0
       ? await runLibrarian(completeWith($), cfg.librarianModel, candidates, aggressive)
-      : { decisions: [], defaulted: [], inputTokens: 0, outputTokens: 0 };
+      : { decisions: [], defaulted: [], unknown: [], inputTokens: 0, outputTokens: 0 };
     // Ids are allocated and bodies BUFFERED here; nothing is persisted until rebuild
     // has cleared the reduction gate. Persisting first left orphan entries + body
     // files behind on every skipped sweep, inflating the banner count and feeding
@@ -242,6 +242,7 @@ export async function runSweep(
       tokensBefore: outcome.tokensBefore, tokensAfter: outcome.tokensAfter,
       librarianInputTokens: lib.inputTokens, librarianOutputTokens: lib.outputTokens,
       ...(lib.defaulted.length > 0 ? { librarianDefaulted: lib.defaulted.length } : {}),
+      ...(lib.unknown.length > 0 ? { librarianUnknown: lib.unknown.length } : {}),
       foldsCreated: foldDecisions.length, restores: restores.length, foldsActive: activeFolds,
     });
     return { messages: finalMessages, tokensBefore: outcome.tokensBefore, tokensAfter: outcome.tokensAfter };

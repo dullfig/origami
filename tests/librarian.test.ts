@@ -26,11 +26,12 @@ test('prompt teaches the anchor-link stub grammar', async () => {
 
 test('parse round-trips well-formed replies with no defaults', async () => {
   const reply = `<decision id="tA" action="fold">src/auth.ts: [JWT validation](hydrate://FOLD#jwt), [refresh flow](hydrate://FOLD#refresh)</decision>`;
-  const { decisions, defaulted } = parseSweepReply(reply, ['tA']);
+  const { decisions, defaulted, unknown } = parseSweepReply(reply, ['tA']);
   expect(decisions.length).toBe(1);
   expect(decisions[0].action).toBe('fold');
   expect(decisions[0].stub.includes('](hydrate://FOLD#jwt)')).toBe(true);
   expect(defaulted).toEqual([]);
+  expect(unknown).toEqual([]);
 });
 
 // A missing decision is NOT a failure: with N candidates the odds of the librarian
@@ -55,10 +56,14 @@ test('parse defaults every id to keep when the reply names none of them', async 
   expect(defaulted).toEqual(['tA']);
 });
 
-// UNKNOWN ids remain a hard failure: the model naming something that was never
-// offered is a hallucination, not an omission, and has no safe default.
-test('parse throws when the reply names an id that was never offered', async () => {
-  let threw = 0;
-  try { parseSweepReply('<decision id="tX" action="keep"></decision>', ['tA']); } catch { threw++; }
-  expect(threw).toBe(1);
+// UNKNOWN ids are dropped, not thrown: `decisions` is built by mapping over
+// expectedIds, so an id the reply names that was never offered has no path into
+// `decisions` (the firewall) and can never be consulted or corrupt anything. A
+// garbled transcription of a real id shows up as one unknown (the typo) plus one
+// defaulted (its intended twin, now unanswered) — both reported, sweep still succeeds.
+test('parse drops a reply naming an id that was never offered and reports it as unknown', async () => {
+  const { decisions, defaulted, unknown } = parseSweepReply('<decision id="tX" action="keep"></decision>', ['tA']);
+  expect(decisions).toEqual([{ toolUseId: 'tA', action: 'keep', stub: '' }]);
+  expect(defaulted).toEqual(['tA']);
+  expect(unknown).toEqual(['tX']);
 });

@@ -137,6 +137,28 @@ test('a librarian reply omitting one of two candidates still succeeds, folds the
   expect(log.includes('"librarianDefaulted":1')).toBe(true);
 });
 
+// --- incident fix: unknown-id tolerance. A librarian reply that names one valid
+// fold decision plus one unknown id (a garbled transcription of a candidate id,
+// same shape as the production incident) must not fail the sweep — the unknown
+// entry is dropped (it was never in expectedIds, so it can't corrupt decisions)
+// and reported via librarianUnknown in the sweep log. ---
+
+test('a librarian reply with one valid decision plus one unknown id still succeeds, folds the valid one, and logs librarianUnknown', async () => {
+  const fake = fakeEngine();
+  const io = await storeIO(fake.$);
+  fake.setModelComplete(() =>
+    `<decision id="t1" action="fold">folded t1.</decision>\n` +
+    `<decision id="toolu_bogus_typo" action="fold">a hallucinated id.</decision>`,
+  );
+  const r = await runSweep(fake.$, cfg, { trigger: 'plugin', messages: twoCandidateTranscript() });
+  if (!('messages' in r!) || !r.messages) throw new Error(`expected a rebuilt sweep, got ${JSON.stringify(r)}`);
+  const folds = await allFolds(io);
+  expect(folds.map(f => f.id)).toEqual(['fold-001']);
+  expect(folds[0].toolUseId).toBe('t1');
+  const log = String(await fake.$.fs.read('.claude/origami/origami.log'));
+  expect(log.includes('"librarianUnknown":1')).toBe(true);
+});
+
 // --- finding 8(a): a second sweep over the first sweep's own output ---
 
 test('two sweeps: banner kept by reference (idempotent), existing stubs are not re-folded, a second marker is appended', async () => {
