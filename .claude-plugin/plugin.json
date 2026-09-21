@@ -1,7 +1,7 @@
 {
   "name": "origami",
   "description": "Variable-resolution context: folds bulky stale tool output to disk behind always-visible stubs; hydrate() recovers detail on demand.",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "userConfig": {
     "foldAgeTurns": { "type": "number", "title": "Fold age (turns)", "default": 3, "description": "Results younger than this many turns are never fold candidates" },
     "minFoldMass": { "type": "number", "title": "Min fold mass (tokens)", "default": 20000, "description": "Candidate token mass that triggers a sweep" },

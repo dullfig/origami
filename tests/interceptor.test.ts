@@ -71,6 +71,72 @@ test('librarian failure on plugin trigger yields skip; on manual yields pass-thr
   expect(manual).toBe(undefined); // fall through to built-in compaction
 });
 
+// --- incident fix: a sweep that throws (librarian down) must still arm the skip-mass
+// cooldown, the same way an explicit skip does. Without this, a failing sweep re-fires
+// the trigger and re-pays a full librarian call on every subsequent turn. ---
+
+test('a librarian that throws on a plugin trigger skips AND records the skip-mass cooldown', async () => {
+  const fake = fakeEngine();
+  const io = await storeIO(fake.$);
+  expect(await io.storeGet('origami:lastSkipMass')).toBe(undefined);
+  fake.setModelComplete(() => { throw new Error('model down'); });
+  const r = await runSweep(fake.$, cfg, { trigger: 'plugin', messages: transcript() });
+  expect((r as { skip?: string })?.skip).toBe('origami: sweep failed');
+  // mirrors how the explicit-skip tests assert the cooldown: through the fake's io,
+  // reached the same way the plugin (storeIO($)) reaches it
+  const mass = await io.storeGet('origami:lastSkipMass');
+  expect(typeof mass).toBe('number');
+  expect((mass as number) > 0).toBe(true);
+});
+
+// --- incident fix: tolerant parsing. A librarian reply omitting a candidate's
+// decision must not fail the whole sweep — the omitted candidate defaults to 'keep'
+// (safe: its content just stays inline) and the sweep still succeeds and folds
+// whatever the librarian DID decide. ---
+
+function twoCandidateTranscript(): SessionMessage[] {
+  const out: SessionMessage[] = [{ role: 'user', text: 'turn0', toolUses: [], handle: 'h0' }];
+  out.push({
+    role: 'assistant', text: '', handle: 'h1',
+    toolUses: [
+      { tool_use_id: 't1', tool: 'Read', input: { file_path: 'a.ts' } },
+      { tool_use_id: 't2', tool: 'Read', input: { file_path: 'b.ts' } },
+    ],
+  });
+  out.push({
+    role: 'user', text: '', toolUses: [], handle: 'h2',
+    toolResults: [
+      { tool_use_id: 't1', text: 'CONTENT '.repeat(2000), isError: false },
+      { tool_use_id: 't2', text: 'OTHER '.repeat(2000), isError: false },
+    ],
+  });
+  for (let i = 1; i <= 4; i++) {
+    out.push({ role: 'user', text: `turn${i}`, toolUses: [], handle: `hu${i}` });
+    out.push({ role: 'assistant', text: `r${i}`, toolUses: [], handle: `ha${i}` });
+  }
+  return out;
+}
+
+test('a librarian reply omitting one of two candidates still succeeds, folds the decided one, and logs librarianDefaulted', async () => {
+  const fake = fakeEngine();
+  const io = await storeIO(fake.$);
+  // answers only t1; t2 is left out entirely (a malformed/short reply, same shape as
+  // the production incident) and must default to keep, not fail the sweep
+  fake.setModelComplete(() => `<decision id="t1" action="fold">folded t1.</decision>`);
+  const r = await runSweep(fake.$, cfg, { trigger: 'plugin', messages: twoCandidateTranscript() });
+  if (!('messages' in r!) || !r.messages) throw new Error(`expected a rebuilt sweep, got ${JSON.stringify(r)}`);
+  const folds = await allFolds(io);
+  expect(folds.map(f => f.id)).toEqual(['fold-001']);
+  expect(folds[0].toolUseId).toBe('t1');
+  const stubs = r.messages.flatMap(m => m.toolResults ?? []).filter(x => x.text.startsWith('[origami '));
+  expect(stubs.length).toBe(1);
+  // t2's original content is still inline, verbatim — the safe default acted
+  const t2Result = r.messages.flatMap(m => m.toolResults ?? []).find(x => x.tool_use_id === 't2');
+  expect(t2Result!.text).toBe('OTHER '.repeat(2000));
+  const log = String(await fake.$.fs.read('.claude/origami/origami.log'));
+  expect(log.includes('"librarianDefaulted":1')).toBe(true);
+});
+
 // --- finding 8(a): a second sweep over the first sweep's own output ---
 
 test('two sweeps: banner kept by reference (idempotent), existing stubs are not re-folded, a second marker is appended', async () => {
