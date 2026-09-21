@@ -1,6 +1,7 @@
 import { test, expect } from 'claude-code/testing';
 import { shouldSweep, readConfig, storeIO } from '../hooks/origami';
-import { putFold } from '../hooks/store';
+import { putFold, putKeep } from '../hooks/store';
+import { contentHash } from '../hooks/rebuild';
 import { fakeEngine } from './fake-engine';
 import type { SessionMessage } from 'claude-code';
 
@@ -104,4 +105,40 @@ test('a live folds toolUseId is discounted from liveTokens, so aggressive stays 
   const d = await shouldSweep($, cfg, t);
   expect(d.aggressive).toBe(false);
   expect(d.sweep).toBe(false);
+});
+
+// --- delta sweeps: the trigger must discount keep-remembered mass ---
+// Without this the trigger fires forever on mass the (non-aggressive) sweep will
+// never offer — the livelock cousin of the skip-mass loop.
+
+test('remaining unremembered mass below minFoldMass: no sweep, even though total candidate mass exceeds it', async () => {
+  const { $ } = fakeEngine();
+  const io = await storeIO($);
+  const t = heavyTranscript(100000);                            // ~25k tokens > 20k threshold
+  expect((await shouldSweep($, cfg, t)).sweep).toBe(true);      // baseline: no keep memory
+  // the librarian already ruled t1 'keep' against exactly this content
+  await putKeep(io, 't1', contentHash('x'.repeat(100000)));
+  const d = await shouldSweep($, cfg, t);
+  expect(d.sweep).toBe(false);
+  expect(d.aggressive).toBe(false);
+});
+
+test('a keep entry whose hash no longer matches does NOT discount the mass', async () => {
+  const { $ } = fakeEngine();
+  const io = await storeIO($);
+  const t = heavyTranscript(100000);
+  await putKeep(io, 't1', 'a-hash-from-different-content');
+  expect((await shouldSweep($, cfg, t)).sweep).toBe(true);
+});
+
+test('keep-memory never discounts liveTokens, so an over-budget session still goes aggressive', async () => {
+  const { $ } = fakeEngine();
+  const io = await storeIO($);
+  const t = heavyTranscript(500000);                            // ~125k > 100k budget
+  await putKeep(io, 't1', contentHash('x'.repeat(500000)));
+  const d = await shouldSweep($, cfg, t);
+  // kept content is genuinely live context: the budget pressure is real
+  expect(d.aggressive).toBe(true);
+  // and an aggressive sweep re-offers everything, so the mass is NOT discounted either
+  expect(d.sweep).toBe(true);
 });

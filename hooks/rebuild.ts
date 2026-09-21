@@ -7,6 +7,22 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
+// FNV-1a over the text, base36 — the same construction as origami.ts's projectHash,
+// which hashes the project root. It lives HERE rather than in origami.ts because the
+// $-rule confines origami.ts to top-level functions the validator can follow $ into;
+// a pure helper needed by store-facing code belongs in a dependency-free module.
+// Not cryptographic and not meant to be: it fingerprints a tool result so a keep
+// verdict can be invalidated if the same tool_use_id ever carries different text.
+// The length is mixed in so a collision needs matching length AND matching digest.
+export function contentHash(text: string): string {
+  let h = 0x811c9dc5;                                   // FNV-1a, 32-bit
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return `${text.length.toString(36)}-${h.toString(36)}`;
+}
+
 // The synthetic sweep-marker user message's fixed text prefix (v1.1 item 6). Shared
 // by sweepMarkerPair (which writes it) and turnAges (which must not count it as a
 // turn start — it is inserted between real turns, not spoken by the user).

@@ -56,12 +56,40 @@ export function parseSweepReply(
   return { decisions, defaulted, unknown };
 }
 
+// A sweep's wall time is one serial librarian prefill over every candidate. Splitting
+// the offer into batches and running them concurrently turns that into the slowest
+// single batch. Batching is the GENERAL path: with <= LIBRARIAN_BATCH_SIZE candidates
+// there is exactly one batch, so the single-call behaviour is unchanged (one prompt,
+// one complete call, the same maxTokens scaling).
+//
+// A batch also contains the blast radius of an omission: parseSweepReply defaults a
+// missing id to 'keep', and because each batch is parsed against ITS OWN expectedIds,
+// a reply that drops everything defaults only its own candidates — the other batches'
+// decisions are unaffected.
+export const LIBRARIAN_BATCH_SIZE = 15;
+
 export async function runLibrarian(
   complete: CompleteFn, model: string, candidates: readonly Candidate[], aggressive: boolean,
 ): Promise<{ decisions: LibrarianDecision[]; defaulted: string[]; unknown: string[]; inputTokens: number; outputTokens: number }> {
-  const prompt = buildSweepPrompt(candidates, aggressive);
-  const maxTokens = Math.min(16384, 1024 + candidates.length * 128);
-  const reply = await complete({ model, prompt, maxTokens });
-  const { decisions, defaulted, unknown } = parseSweepReply(reply, candidates.map(c => c.toolUseId));
-  return { decisions, defaulted, unknown, inputTokens: estimateTokens(prompt), outputTokens: estimateTokens(reply) };
+  const batches: Candidate[][] = [];
+  for (let i = 0; i < candidates.length; i += LIBRARIAN_BATCH_SIZE) {
+    batches.push(candidates.slice(i, i + LIBRARIAN_BATCH_SIZE));
+  }
+  const runs = await Promise.all(batches.map(async (batch) => {
+    const prompt = buildSweepPrompt(batch, aggressive);
+    const maxTokens = Math.min(16384, 1024 + batch.length * 128);
+    const reply = await complete({ model, prompt, maxTokens });
+    const parsed = parseSweepReply(reply, batch.map(c => c.toolUseId));
+    return { ...parsed, inputTokens: estimateTokens(prompt), outputTokens: estimateTokens(reply) };
+  }));
+  // Batches are contiguous, in-order slices, so flattening restores the caller's own
+  // candidate order — `decisions` stays aligned with `candidates` exactly as the
+  // single-call path produced it.
+  return {
+    decisions: runs.flatMap(r => r.decisions),
+    defaulted: runs.flatMap(r => r.defaulted),
+    unknown: runs.flatMap(r => r.unknown),
+    inputTokens: runs.reduce((s, r) => s + r.inputTokens, 0),
+    outputTokens: runs.reduce((s, r) => s + r.outputTokens, 0),
+  };
 }
