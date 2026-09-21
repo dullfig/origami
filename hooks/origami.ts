@@ -1,7 +1,7 @@
 import type { Register, EngineInterface, SessionCompactInput, SessionCompactResult, SessionMessage } from 'claude-code';
-import { selectCandidates, rebuild, bannerText, stripBanner, applyBanner, foldIdsPresent, foldIndexMessage, sweepMarkerPair, BANNER_PREFIX, BANNER_ACK, type FoldDecision, type RestoreDecision, candidateMass, estimateTokens } from './rebuild';
+import { selectCandidates, rebuild, bannerText, stripBanner, applyBanner, foldIdsPresent, foldIndexMessage, sweepMarkerPair, contentHash, BANNER_PREFIX, BANNER_ACK, type Candidate, type FoldDecision, type RestoreDecision, candidateMass, estimateTokens } from './rebuild';
 import { runLibrarian, type CompleteFn } from './librarian';
-import { newFoldId, putFold, getFold, setFold, allFolds, appendLog, inputKeyOf, type FoldEntry, type StoreIO } from './store';
+import { newFoldId, putFold, getFold, setFold, allFolds, getKeeps, putKeep, dropKeep, appendLog, inputKeyOf, type FoldEntry, type KeepEntry, type StoreIO } from './store';
 
 // $.store is PLUGIN-GLOBAL: one JSON file under the user's Claude Code config dir
 // (types/claude-code.d.ts ~:2823-2830), shared by every project this plugin runs in.
@@ -36,6 +36,7 @@ export async function storeIO($: EngineInterface): Promise<StoreIO> {
     fsExists: (path) => $.fs.exists(path),
     storeGet: (key) => $.store.get(prefix + key),
     storeSet: (key, value) => $.store.set(prefix + key, value),
+    storeDelete: (key) => $.store.delete(prefix + key),
     storeKeys: async () => (await $.store.keys())
       .filter(k => k.startsWith(prefix)).map(k => k.slice(prefix.length)),
   };
@@ -45,7 +46,7 @@ function completeWith($: EngineInterface): CompleteFn {
 }
 
 // Keep in sync with .claude-plugin/plugin.json's "version".
-export const ORIGAMI_VERSION = '1.0.3';
+export const ORIGAMI_VERSION = '1.0.5';
 
 export type OrigamiConfig = {
   foldAgeTurns: number;
@@ -90,6 +91,15 @@ const LAST_SKIP_MASS = 'origami:lastSkipMass';
 const SKIP_COOLDOWN_FACTOR = 1.2;
 const AGGRESSIVE = 'origami:aggressive';
 
+// A candidate is keep-remembered when a previous sweep's librarian ruled it `keep`
+// AND its content still hashes to what that verdict was made about. Shared by the
+// trigger (which must not fire on mass the sweep will not offer) and the sweep
+// itself (which must not re-offer it), so the two can never disagree.
+export function isKeepRemembered(keeps: ReadonlyMap<string, KeepEntry>, c: Candidate): boolean {
+  const k = keeps.get(c.toolUseId);
+  return k !== undefined && k.hash === contentHash(c.text);
+}
+
 export async function shouldSweep(
   $: EngineInterface, cfg: OrigamiConfig, messagesArg?: readonly SessionMessage[],
 ): Promise<{ sweep: boolean; aggressive: boolean }> {
@@ -101,12 +111,27 @@ export async function shouldSweep(
   // F11: the same discount applies to the working-set figure. A raw transcript view
   // still carrying already-folded results must not push the session into aggressive
   // mode on mass that is, on disk, already reduced.
+  //
+  // ASYMMETRY, deliberate: `excluded` (live folds) is discounted from BOTH figures
+  // below, but keep-memory is discounted from the CANDIDATE MASS only and never from
+  // liveTokens. The two figures answer different questions. Candidate mass asks "is
+  // there work a sweep would actually do?" — and a non-aggressive sweep will not
+  // re-offer keep-remembered content, so counting it there makes the trigger fire
+  // forever on mass no sweep will ever fold (the livelock cousin of the skip-mass
+  // loop). liveTokens asks "how full is the context?" — and kept content is genuinely
+  // live, un-reduced, still-in-the-window text. Discounting it there would hide real
+  // budget pressure and suppress exactly the aggressive sweep that exists to REVERSE
+  // those earlier keeps.
   const liveTokens = messages.reduce((s, m) => s + estimateTokens(m.text)
     + (m.toolResults ?? []).reduce((a, r) => a + (excluded.has(r.tool_use_id) ? 0 : estimateTokens(r.text)), 0), 0);
   const aggressive = liveTokens > cfg.workingSetBudget;
+  const keeps = await getKeeps(io);
   const mass = candidateMass(
     selectCandidates(messages, excluded, cfg, aggressive)
-      .filter(c => !c.text.startsWith('[origami fold-')),
+      .filter(c => !c.text.startsWith('[origami fold-'))
+      // an aggressive sweep ignores keep-memory and re-offers everything, so the
+      // trigger must not discount it either
+      .filter(c => aggressive || !isKeepRemembered(keeps, c)),
   );
   const triggered = mass >= cfg.minFoldMass || (aggressive && mass > 0);
   const lastSkipMass = Number((await io.storeGet(LAST_SKIP_MASS)) ?? 0);
@@ -119,7 +144,29 @@ export async function runSweep(
   $: EngineInterface, cfg: OrigamiConfig, e: Pick<SessionCompactInput, 'trigger' | 'agentId' | 'messages'>,
 ): Promise<SessionCompactResult | undefined> {
   if (e.agentId) return undefined;                       // main thread only
-  if (e.trigger === 'precompute') return undefined;      // out of scope v1
+  // PRECOMPUTE: still passed through, DELIBERATELY, on evidence rather than caution.
+  // The caching semantics ARE clear — types/claude-code.d.ts :8523-8524 ("`precompute`
+  // is the one dispatch that installs nothing: its result is kept for the compaction
+  // that comes, if the conversation it ran over still leads") and :8443-8445 ("What the
+  // transcript becomes (kept, on `precompute`, for the compaction that comes)"). So a
+  // precompute answer is cached and later applied, not run immediately, and answering
+  // it would NOT double-run the librarian for a precompute that is used.
+  //
+  // What blocks it is the DISCARD path, which the same sentence declares: the result
+  // is kept only "if the conversation it ran over still leads". runSweep is not pure —
+  // it allocates fold ids, writes body files and persists `state: 'folded'` entries.
+  // On a discarded precompute those entries exist while their stubs never reached the
+  // transcript, and shouldSweep excludes every non-evicted fold's toolUseId from the
+  // candidate mass (see `excluded` above). The trigger would then stay quiet on mass
+  // that is still fully inline, and only a sweep's reconcile pass can evict the orphans
+  // — a sweep the suppressed trigger never fires. That is a livelock, not a cost.
+  // :8511-8517 (`SessionCompactSkipped`: "on `precompute` nothing is computed or kept")
+  // is the only declared escape, and it is exactly what this early return takes.
+  //
+  // Answering precompute safely needs deferred persistence (buffer the fold entries,
+  // commit them when the result is actually installed), and NOTHING in the declarations
+  // tells a hook whether its precomputed result was installed. Out of scope here.
+  if (e.trigger === 'precompute') return undefined;
   // F10: what a stock compaction would destroy if origami passes this event through.
   // Declared OUTSIDE the try so the catch path can apply the same guard: a sweep that
   // throws after the index was read (librarian down, rebuild invariant) must not hand
@@ -165,6 +212,16 @@ export async function runSweep(
     for (const f of await allFolds(io)) {
       if (f.state === 'folded' && !stubIds.has(f.id)) await setFold(io, { ...f, state: 'evicted' });
     }
+    // Keep-memory lifecycle, same reconcile pass: an entry whose tool_use_id no longer
+    // appears anywhere in this transcript view is dead (the turn was rewound, the
+    // result was compacted away by something else) and would otherwise accumulate
+    // forever in a plugin-global store. Collecting the live ids is one cheap scan.
+    const liveToolUseIds = new Set<string>();
+    for (const m of messages) for (const r of m.toolResults ?? []) liveToolUseIds.add(r.tool_use_id);
+    const keeps = await getKeeps(io);
+    for (const id of [...keeps.keys()]) {
+      if (!liveToolUseIds.has(id)) { await dropKeep(io, id); keeps.delete(id); }
+    }
     const folds = await allFolds(io);
     // pinned folds stay open: once restored inline their big results must never
     // become candidates again, so exclusion is by the toolUseId the entry recorded
@@ -173,7 +230,23 @@ export async function runSweep(
     const aggressive = Boolean(await io.storeGet(AGGRESSIVE));
     const candidates = selectCandidates(messages, excluded, cfg, aggressive)
       .filter(c => !c.text.startsWith('[origami fold-'));  // never re-fold a stub
-    sweepCandidateMass = candidateMass(candidates);
+    // --- DELTA SWEEP: partition candidates against keep-memory ---
+    // A candidate the librarian already ruled `keep`, whose content still hashes the
+    // same, needs no new decision: it stays inline exactly as it is. Excluding it from
+    // the offer is the whole point — steady-state sweeps prefill only NEW mass instead
+    // of re-reading the entire kept working set every time.
+    //
+    // AGGRESSIVE OVERRIDE: an over-budget sweep must be able to REVERSE earlier keeps,
+    // so it ignores keep-memory entirely and re-offers everything.
+    const offered: Candidate[] = [];
+    for (const c of candidates) {
+      if (!aggressive && isKeepRemembered(keeps, c)) continue;
+      // a stale entry (same id, different content) no longer describes anything the
+      // librarian saw: drop it now and let the fresh decision below replace it
+      if (!aggressive && keeps.has(c.toolUseId)) await dropKeep(io, c.toolUseId);
+      offered.push(c);
+    }
+    sweepCandidateMass = candidateMass(offered);
     // reopen pinned folds whose stubs still sit in history
     const restores: RestoreDecision[] = [];
     for (const f of folds.filter(f => f.state === 'pinned')) {
@@ -186,13 +259,31 @@ export async function runSweep(
         }
       }
     }
-    if (candidates.length === 0 && restores.length === 0) {
+    // Nothing OFFERED (not merely nothing selected): a sweep whose whole candidate set
+    // is keep-remembered has no question to ask and must not pay a librarian call.
+    if (offered.length === 0 && restores.length === 0) {
       if (e.trigger === 'plugin') return { skip: 'origami: nothing to fold' };
       return manualGuard();   // manual+live folds → skip; otherwise pass through
     }
-    const lib = candidates.length > 0
-      ? await runLibrarian(completeWith($), cfg.librarianModel, candidates, aggressive)
+    const lib = offered.length > 0
+      ? await runLibrarian(completeWith($), cfg.librarianModel, offered, aggressive)
       : { decisions: [], defaulted: [], unknown: [], inputTokens: 0, outputTokens: 0 };
+    // Record the verdicts. Only an EXPLICIT keep — one the librarian actually judged —
+    // is remembered. A `defaulted` id was never judged at all: parseSweepReply falls
+    // back to 'keep' as a safety default for THIS sweep only (an omission, or a whole
+    // rejected batch — see runLibrarian), and memoizing it would turn that one-sweep
+    // fallback into a permanent suppression from every future non-aggressive sweep.
+    // Leaving no entry means the candidate is simply re-offered next sweep, giving the
+    // librarian another chance to judge it. A `fold` clears any entry, since the
+    // content is about to become a stub.
+    const defaultedIds = new Set(lib.defaulted);
+    for (const d of lib.decisions) {
+      const c = offered.find(x => x.toolUseId === d.toolUseId);
+      if (!c) continue;
+      if (d.action === 'keep') {
+        if (!defaultedIds.has(d.toolUseId)) await putKeep(io, d.toolUseId, contentHash(c.text));
+      } else if (keeps.has(d.toolUseId)) await dropKeep(io, d.toolUseId);
+    }
     // Ids are allocated and bodies BUFFERED here; nothing is persisted until rebuild
     // has cleared the reduction gate. Persisting first left orphan entries + body
     // files behind on every skipped sweep, inflating the banner count and feeding
@@ -211,13 +302,13 @@ export async function runSweep(
       foldDecisions.push({ toolUseId: d.toolUseId, foldId: id, stub });
     }
     if (foldDecisions.length === 0 && restores.length === 0) {
-      await io.storeSet(LAST_SKIP_MASS, candidateMass(candidates));
+      await io.storeSet(LAST_SKIP_MASS, candidateMass(offered));   // the offer, not the selection: shouldSweep discounts keeps the same way
       if (e.trigger === 'plugin') return { skip: 'origami: librarian kept everything' };
       return manualGuard();
     }
     const outcome = rebuild(messages, foldDecisions, restores, cfg, aggressive);
     if (outcome.kind === 'insufficient') {
-      await io.storeSet(LAST_SKIP_MASS, candidateMass(candidates));
+      await io.storeSet(LAST_SKIP_MASS, candidateMass(offered));   // the offer, not the selection: shouldSweep discounts keeps the same way
       if (e.trigger === 'plugin') return { skip: `origami: reduction ${outcome.ratio.toFixed(2)} below threshold` };
       return manualGuard();
     }

@@ -1,8 +1,8 @@
 import { test, expect } from 'claude-code/testing';
 import { runSweep, storeIO, handleHydrate, observeMissedHydrate, ORIGAMI_VERSION } from '../hooks/origami';
 import { readConfig } from '../hooks/origami';
-import { getFold, allFolds, putFold } from '../hooks/store';
-import { BANNER_PREFIX, BANNER_ACK, bannerText, foldIndexMessage, MARKER_PREFIX } from '../hooks/rebuild';
+import { getFold, allFolds, putFold, getKeeps, putKeep } from '../hooks/store';
+import { BANNER_PREFIX, BANNER_ACK, bannerText, foldIndexMessage, contentHash, MARKER_PREFIX } from '../hooks/rebuild';
 import { fakeEngine } from './fake-engine';
 import type { SessionMessage } from 'claude-code';
 
@@ -71,15 +71,25 @@ test('librarian failure on plugin trigger yields skip; on manual yields pass-thr
   expect(manual).toBe(undefined); // fall through to built-in compaction
 });
 
-// --- incident fix: a sweep that throws (librarian down) must still arm the skip-mass
-// cooldown, the same way an explicit skip does. Without this, a failing sweep re-fires
-// the trigger and re-pays a full librarian call on every subsequent turn. ---
+// --- incident fix: a sweep that throws must still arm the skip-mass cooldown, the
+// same way an explicit skip does. Without this, a failing sweep re-fires the trigger
+// and re-pays a full librarian call on every subsequent turn.
+//
+// NOTE (1.0.5, Fix 2): a librarian `complete()` rejection no longer reaches this catch
+// path at all — runLibrarian (Promise.allSettled) now absorbs it and degrades the
+// batch to defaulted keeps, so the sweep skips cleanly via the ordinary "librarian
+// kept everything" branch instead (see the librarian-batch tests in librarian.test.ts,
+// and interceptor test (a2) below for the non-memoization of that default). This test
+// now exercises a genuinely different failure — a persistence error thrown well after
+// the librarian has answered — to keep the catch block's own cooldown-arming logic
+// covered. ---
 
-test('a librarian that throws on a plugin trigger skips AND records the skip-mass cooldown', async () => {
+test('a sweep that throws persisting a fold on a plugin trigger skips AND records the skip-mass cooldown', async () => {
   const fake = fakeEngine();
   const io = await storeIO(fake.$);
   expect(await io.storeGet('origami:lastSkipMass')).toBe(undefined);
-  fake.setModelComplete(() => { throw new Error('model down'); });
+  fake.setModelComplete(foldEverything);
+  fake.failWritesWhen((path) => path.includes('/folds/'));   // the fold body write throws
   const r = await runSweep(fake.$, cfg, { trigger: 'plugin', messages: transcript() });
   expect((r as { skip?: string })?.skip).toBe('origami: sweep failed');
   // mirrors how the explicit-skip tests assert the cooldown: through the fake's io,
@@ -354,4 +364,128 @@ test('insufficient reduction through runSweep persists no folds and records the 
   expect([...fake.files.keys()].filter(k => k.includes('/folds/')).length).toBe(0);
   // and the cooldown marker is armed with the mass we skipped on
   expect(await io.storeGet('origami:lastSkipMass')).toBe(300);   // 1200 chars / 4
+});
+
+// --- DELTA SWEEPS: keep-verdict memory ---
+// Both observed live sweeps re-read essentially the same content: candidates the
+// librarian had already ruled `keep` stayed inline, aged and bulky, and were
+// re-offered wholesale. A steady-state sweep must read only NEW mass.
+
+// a completion handler that records every call so a test can assert the librarian
+// was NOT reached at all
+function recordingLibrarian(reply: (req: { prompt: string }) => string) {
+  const prompts: string[] = [];
+  return {
+    prompts,
+    get calls() { return prompts.length; },
+    handler: (req: { prompt: string }) => { prompts.push(req.prompt); return reply(req); },
+  };
+}
+
+test('(a) a kept candidate is not re-offered: the second sweep never calls the librarian', async () => {
+  const fake = fakeEngine();
+  const io = await storeIO(fake.$);
+  const lib = recordingLibrarian(() =>
+    `<decision id="t1" action="fold">folded t1.</decision>\n<decision id="t2" action="keep">keep t2</decision>`);
+  fake.setModelComplete(lib.handler);
+
+  const first = await runSweep(fake.$, cfg, { trigger: 'plugin', messages: twoCandidateTranscript() });
+  if (!('messages' in first!) || !first.messages) throw new Error('expected a rebuilt first sweep');
+  expect(lib.calls).toBe(1);
+  expect(lib.prompts[0].includes('<candidate id="t1"')).toBe(true);
+  expect(lib.prompts[0].includes('<candidate id="t2"')).toBe(true);
+  // the keep verdict is remembered against t2's exact content
+  const keeps = await getKeeps(io);
+  expect([...keeps.keys()]).toEqual(['t2']);
+  expect(keeps.get('t2')!.hash).toBe(contentHash('OTHER '.repeat(2000)));
+
+  // second sweep over the first sweep's own output: t1 is a stub (never re-folded),
+  // t2 is unchanged and keep-remembered — so NOTHING is offered
+  const second = await runSweep(fake.$, cfg, { trigger: 'plugin', messages: first.messages });
+  expect(lib.calls).toBe(1);                                   // the librarian was never reached
+  expect((second as { skip?: string }).skip).toBe('origami: nothing to fold');
+  // t2's content is untouched and its memory intact
+  expect((await getKeeps(io)).get('t2')!.hash).toBe(contentHash('OTHER '.repeat(2000)));
+});
+
+// A candidate the librarian OMITS (never actually judged) is not the same as one it
+// explicitly ruled keep: parseSweepReply defaults it to keep as a safety fallback for
+// THIS sweep only. Memoizing that default would suppress the candidate from every
+// future non-aggressive sweep, permanently — so it must get NO keep entry, and must be
+// re-offered (and get a real chance at judgment) next sweep.
+test('(a2) a defaulted (omitted) keep folds nothing this sweep, is NOT memoized, and is re-offered next sweep', async () => {
+  const fake = fakeEngine();
+  const io = await storeIO(fake.$);
+  // t1 is judged (fold); t2 is left out of the reply entirely — a default, not a verdict
+  const lib = recordingLibrarian(() => `<decision id="t1" action="fold">folded t1.</decision>`);
+  fake.setModelComplete(lib.handler);
+
+  const first = await runSweep(fake.$, cfg, { trigger: 'plugin', messages: twoCandidateTranscript() });
+  if (!('messages' in first!) || !first.messages) throw new Error('expected a rebuilt first sweep');
+  expect(lib.calls).toBe(1);
+  // t2's content stays inline verbatim (the safe default acted)...
+  const t2Result = first.messages.flatMap(m => m.toolResults ?? []).find(x => x.tool_use_id === 't2');
+  expect(t2Result!.text).toBe('OTHER '.repeat(2000));
+  // ...but no keep-memory entry exists for it — unlike an EXPLICIT keep (see test (a))
+  expect((await getKeeps(io)).has('t2')).toBe(false);
+
+  // second, identical sweep over the first sweep's own output: with no keep entry to
+  // suppress it, t2 must be re-offered to the librarian for a real judgment
+  const second = await runSweep(fake.$, cfg, { trigger: 'plugin', messages: first.messages });
+  expect(lib.calls).toBe(2);
+  expect(lib.prompts[1].includes('<candidate id="t2"')).toBe(true);
+});
+
+test('(b) a keep entry whose hash no longer matches is dropped and the candidate is re-offered', async () => {
+  const fake = fakeEngine();
+  const io = await storeIO(fake.$);
+  // a verdict recorded against DIFFERENT content than t1 now carries
+  await putKeep(io, 't1', contentHash('what the librarian saw last time'));
+  const lib = recordingLibrarian(foldEverything);
+  fake.setModelComplete(lib.handler);
+
+  const r = await runSweep(fake.$, cfg, { trigger: 'plugin', messages: transcript() });
+  if (!('messages' in r!) || !r.messages) throw new Error('expected a rebuilt sweep');
+  expect(lib.calls).toBe(1);
+  expect(lib.prompts[0].includes('<candidate id="t1"')).toBe(true);   // re-offered
+  expect((await allFolds(io)).map(f => f.toolUseId)).toEqual(['t1']);
+  // a fold verdict clears the memory: the content is a stub now
+  expect((await getKeeps(io)).has('t1')).toBe(false);
+});
+
+test('(c) an aggressive sweep ignores keep-memory and re-offers the kept candidate', async () => {
+  const fake = fakeEngine();
+  const io = await storeIO(fake.$);
+  // t1 is keep-remembered against exactly the content it still carries
+  await putKeep(io, 't1', contentHash('CONTENT '.repeat(2000)));
+  const quiet = recordingLibrarian(foldEverything);
+  fake.setModelComplete(quiet.handler);
+  // non-aggressive first: keep-memory holds, nothing is offered
+  const calm = await runSweep(fake.$, cfg, { trigger: 'plugin', messages: transcript() });
+  expect(quiet.calls).toBe(0);
+  expect((calm as { skip?: string }).skip).toBe('origami: nothing to fold');
+  expect((await getKeeps(io)).has('t1')).toBe(true);            // still remembered
+
+  // now the working set is over budget — the sweep must be able to REVERSE the keep
+  await io.storeSet('origami:aggressive', true);
+  const r = await runSweep(fake.$, cfg, { trigger: 'plugin', messages: transcript() });
+  if (!('messages' in r!) || !r.messages) throw new Error('expected a rebuilt aggressive sweep');
+  expect(quiet.calls).toBe(1);
+  expect(quiet.prompts[0].includes('<candidate id="t1"')).toBe(true);
+  expect(quiet.prompts[0].includes('over budget')).toBe(true);
+  expect((await allFolds(io)).map(f => f.toolUseId)).toEqual(['t1']);
+  expect((await getKeeps(io)).has('t1')).toBe(false);           // the keep was reversed
+});
+
+test('the reconcile pass prunes a keep entry whose toolUseId has left the transcript', async () => {
+  const fake = fakeEngine();
+  const io = await storeIO(fake.$);
+  await putKeep(io, 'tGone', 'some-hash');                      // an id no transcript carries
+  await putKeep(io, 't1', 'a-stale-hash');                      // present, but stale
+  fake.setModelComplete(foldEverything);
+  const r = await runSweep(fake.$, cfg, { trigger: 'plugin', messages: transcript() });
+  if (!('messages' in r!) || !r.messages) throw new Error('expected a rebuilt sweep');
+  const keeps = await getKeeps(io);
+  expect(keeps.has('tGone')).toBe(false);                       // dead entry pruned
+  expect(keeps.has('t1')).toBe(false);                          // stale then folded
 });

@@ -7,6 +7,7 @@ export type StoreIO = {
   // already this project's own and storeKeys() returns prefix-stripped keys.
   storeGet: (key: string) => Promise<unknown>;
   storeSet: (key: string, value: unknown) => Promise<void>;
+  storeDelete: (key: string) => Promise<void>;
   storeKeys: () => Promise<string[]>;
 };
 
@@ -65,6 +66,42 @@ export async function allFolds(io: StoreIO): Promise<FoldEntry[]> {
     if (e) out.push(e);
   }
   return out;
+}
+
+// --- Keep-memory (delta sweeps) ---
+// A candidate the librarian EXPLICITLY ruled `keep` stays inline, aged and bulky, and
+// would otherwise be re-offered wholesale on EVERY later sweep — the observed
+// ~100k-token, ~30s prefill that reads the same content twice running. Remembering the
+// verdict, keyed by the tool_use_id and fingerprinted by the content hash, makes
+// steady-state sweeps read only NEW mass. The hash is what makes the memory safe: if
+// the same id ever carries different text, the verdict no longer applies and the
+// candidate is offered again. A DEFAULTED keep (the librarian never actually judged
+// it — an omission, or a whole batch whose call failed) is never written here: it must
+// stay retryable, not become a permanent suppression (see origami.ts's recording loop).
+export type KeepEntry = { hash: string; ts: string };
+
+const KEEP_PREFIX = 'origami:keep:';
+const KEEP = (toolUseId: string) => `${KEEP_PREFIX}${toolUseId}`;
+
+// Mirrors allFolds: enumerate the project-scoped keys, read each entry back. Returns
+// a map tool_use_id -> entry so callers can probe by id without another round trip.
+export async function getKeeps(io: StoreIO): Promise<Map<string, KeepEntry>> {
+  const keys = (await io.storeKeys()).filter((k: string) => k.startsWith(KEEP_PREFIX));
+  const out = new Map<string, KeepEntry>();
+  for (const k of keys) {
+    const e = (await io.storeGet(k)) as KeepEntry | undefined;
+    if (e && typeof e.hash === 'string') out.set(k.slice(KEEP_PREFIX.length), e);
+  }
+  return out;
+}
+
+export async function putKeep(io: StoreIO, toolUseId: string, hash: string): Promise<void> {
+  const entry: KeepEntry = { hash, ts: new Date().toISOString() };
+  await io.storeSet(KEEP(toolUseId), entry);
+}
+
+export async function dropKeep(io: StoreIO, toolUseId: string): Promise<void> {
+  await io.storeDelete(KEEP(toolUseId));
 }
 
 // Best-effort telemetry: the log is a diagnostic, never a dependency. A write that

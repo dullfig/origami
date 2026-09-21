@@ -41,6 +41,7 @@ export function fakeEngine(root = '/proj/alpha'): {
     store: {
       get: async (key: string) => kv.get(key),
       set: async (key: string, value: unknown) => { kv.set(key, value); },
+      delete: async (key: string) => { kv.delete(key); },
       keys: async () => [...kv.keys()],
     },
     model: {
@@ -59,6 +60,7 @@ export function fakeEngine(root = '/proj/alpha'): {
     fsExists: async (path: string) => files.has(path),
     storeGet: async (key: string) => kv.get(key),
     storeSet: async (key: string, value: unknown) => { kv.set(key, value); },
+    storeDelete: async (key: string) => { kv.delete(key); },
     storeKeys: async () => [...kv.keys()],
   };
   return {
