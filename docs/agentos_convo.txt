@@ -1,0 +1,272 @@
+good morning. i am working on a project next door, origami, folds the context so you can still see the files you may have opened, but folded, and your full context refers to it. if you need to look at it again you request an unfold and the file comes back. wich got me thinking. what is we loaded the entire codebase with ever function folded? can you run a count of how many functions there are in agentos?
+13 skills available
+
+Morning. Let me count — and this is a good question to answer precisely, because the number decides whether the idea is even interesting.
+
+2,854 function definitions across 171 files and 25 crates. But the breakdown matters more than the total:
+
+┌───────────────────────────────────┬─────────────────┐
+│                                   │      count      │
+├───────────────────────────────────┼─────────────────┤
+│ total fn definitions              │ 2,854           │
+├───────────────────────────────────┼─────────────────┤
+│ of which #[test] / #[tokio::test] │ 1,404           │
+├───────────────────────────────────┼─────────────────┤
+│ non-test functions                │ 1,450           │
+├───────────────────────────────────┼─────────────────┤
+│ pub functions                     │ 750             │
+├───────────────────────────────────┼─────────────────┤
+│ files                             │ 171             │
+├───────────────────────────────────┼─────────────────┤
+│ lines / bytes                     │ 65,474 / 2.2 MB │
+└───────────────────────────────────┴─────────────────┘
+
+Concentration is lopsided: tui (573) and tools (509) are 38% of all functions between them. Then a long tail — 14 crates have under 50 each, and security has 15.
+
+The number that actually answers your question
+
+2.2 MB of Rust is roughly 700k tokens. Which means the entire AgentOS codebase already fits in a 1M context window unfolded, with room left over.
+
+So "load the whole codebase with every function folded" isn't solving a capacity problem — it can't be, because there isn't one at this size. If folding is worth doing here, it's for a different reason, and it's one your own README already argues:
+
+▎ every irrelevant token degrades the thinker. Focused 300 tokens beats full 128K history.
+
+That's the real case. Not "it won't fit" but "700k tokens of mostly-irrelevant code competing for attention makes the model worse at the one function it needs." Which is a claim you'd want to measure rather than assume, and it's measurable — same harness, same task, folded vs. unfolded.
+
+The granularity ladder
+
+The cost depends entirely on how fine you fold, and function-level is the expensive end:
+
+┌────────────────────┬─────────┬─────────────────────────────────────────────┐
+│    granularity     │ entries │              rough index cost               │
+├────────────────────┼─────────┼─────────────────────────────────────────────┤
+│ crates             │ 25      │ ~2k tokens (≈ what CLAUDE.md already holds) │
+├────────────────────┼─────────┼─────────────────────────────────────────────┤
+│ files              │ 171     │ ~9k tokens                                  │
+├────────────────────┼─────────┼─────────────────────────────────────────────┤
+│ non-test functions │ 1,450   │ ~58k tokens                                 │
+├────────────────────┼─────────┼─────────────────────────────────────────────┤
+│ all functions      │ 2,854   │ ~114k tokens                                │
+└────────────────────┴─────────┴─────────────────────────────────────────────┘
+
+Assuming ~40 tokens per stub (signature plus a one-line purpose — Rust signatures are wordy).
+
+Two things fall out of that:
+
+Excluding tests is free and halves the index. 1,404 of 2,854 are test functions. You essentially never need test_boundary_burst in a navigational index, and dropping them costs nothing.
+
+Function-level across a whole repo is not obviously the right default. 114k tokens of index is a large working session's entire budget spent before you've done anything. File-level is 12× cheaper and probably captures most of the navigational value — you usually need "which file," and once you're in the file you can read it. Function-level earns its cost when the task is cross-cutting: blast radius, who-calls-what, does-this-helper-already-exist.
+
+Which suggests the interesting design isn't one fold level — it's folding at different granularities in the same context. Crate-level for the 20 crates you're not touching, function-level for the two you are.
+
+Two connections worth noting
+
+This is project_two_tier_memory with a different substrate. Synopsis tier that's always scanned, source tier you drill into on demand — the fold is the synopsis, the unfold is the drill. Same shape as the pin bank's own descriptions-then-bodies protocol, which is how I cold-started this project in the first place.
+
+And more interesting: origami is the token-level prototype of what you wanted to build at the KV level last month. Fold = evict from context, keep a stub. Unfold = re-insert and re-prefill. The composable-KV version keeps the computed attention instead of re-prefilling — same policy, cheaper mechanism.
+
+That ordering is lucky. If origami's fold policy proves out at the token level, the KV version stops being a speculative build and becomes a performance optimization of a policy you've already validated. Worth letting origami run first for that reason alone.
+
+✻ Baked for 1m 48s · done 7:11 AM
+
+> [origami sweep report: folded fold-001, fold-002, fold-003, fold-004, fold-005, fold-006, fold-007, fold-008, fold-009, fold-010, fold-011, fold-012, fold-013, fold-014, fold-015, fold-016, fold-017, fold-018, fold-019, fold-020, fold-021, fold-022, fold-023, fold-024, fold-025, fold-026, fold-027, fold-028, fold-029, fold-030; restored nothing; 30 folds now active. Content discussed above this point may now render as stubs — hydrate to recover it.]
+
+Noted. [synthetic acknowledgment inserted by origami]
+
+> by the way, you have been a "victim" of origami already, as you may notice there is a banner now at the top that was snuck in, and it went through the whole context and folded every file you ever opened. or most.
+
+Noticed — 30 folds, and the banner appeared mid-session. Since you've put me in the test-pilot seat, let me give you actual findings rather than impressions. One thing I want to verify first.
+
+Hydrate works. One finding immediately: the #anchor is advisory, not a slice — I passed #no-branch and got the entire fold back, both sections plus the original command. Fine for a small fold; but fold-006 is 110 KB of pin descriptions, so the folds where slicing would matter most are exactly the ones where whole-fold return hurts.
+
+Now let me test something riskier about my own state.
+
+Quote survived verbatim — README.md:121-122, exactly as I'd cited it. But that's the finding, not the reassurance. Let me explain.
+
+Why the fold didn't disrupt me
+
+The asymmetry is the design's whole trick: tool results got folded, my own prose didn't. Raw tool output is high-volume and low-density; my summary of it is the distillate I already spent attention producing. Folding the raw and keeping the distillate is your two-tier memory pattern applied automatically — synopsis retained, source evicted, drill-down on demand.
+
+So when you folded 30 results, you deleted the expensive half of something I'd already extracted the value from. That's why it cost me nothing.
+
+The risk that creates, which I just tested
+
+Quotes degrade into paraphrases across folds, and nothing flags it.
+
+I quoted your README's context-rot line in my last message. The source is now fold-only. I just re-checked it against disk — verbatim, correct. But it survived because I happened to quote it exactly at the time. Had I paraphrased it loosely, that paraphrase would now be my sole record, indistinguishable in my own context from a quote, with no marker saying "this passed through a lossy step."
+
+That's your one-refusal problem in miniature: the generator can't audit its own recall, and after a fold there's no external signal separating "I reproduced this" from "I reconstructed this." The banner's "never state details of folded content from the stub alone" covers the stub case — it doesn't cover the case where I'm quoting my own earlier prose about folded content, which reads as first-hand and isn't.
+
+Cheap mitigation on your side: have the stub record which verbatim spans the assistant reproduced. Or on mine: anything presented as a quote after a fold gets re-verified before it's load-bearing — which is what I just did.
+
+The stub I'd look at hardest
+
+fold-006 reads: "subset of toolu_012ZH…, redundant."
+
+That's not compression — that's deduplication. The librarian decided two results overlapped and marked one skippable. It was right in that instance (I'd run the same extraction twice, once with a broken awk). But note the failure asymmetry: compression loses detail visibly — you can see the stub is shorter than the thing. A wrong redundancy verdict loses an entire artifact invisibly, and the stub gives me no way to know what the diff was. If I were prioritizing beta scrutiny, I'd put it there rather than on summary quality.
+
+What's genuinely working
+
+The stubs are good advertisements, which is the hard part. fold-025 — "bitnet vs ternary-rs tree diff: 12 differing files, 4 GPU-only in ternary-rs" — tells me precisely enough to know whether I need it, without telling me so much that I'd be tempted to answer from the stub. That calibration is the thing most summarizers get wrong in one direction or the other.
+
+Honest caveat
+
+I haven't actually been stressed by this yet. Everything I needed this turn came from fresh calls. The real test is the turn where I need a detail that exists only in a fold and don't notice the gap — and by construction, that's the case I'd be worst at self-reporting.
+
+Which is also why the count from a minute ago is relevant: at ~700k tokens for all of AgentOS, origami's interesting regime isn't "make it fit." It's exactly this — what survives a fold, and whether the thing that survives knows what it lost.
+
+✻ Crunched for 1m 35s · done 7:17 AM
+
+> [origami sweep report: folded fold-031, fold-032, fold-033, fold-034, fold-035, fold-036, fold-037, fold-038, fold-039, fold-040, fold-041, fold-042, fold-043; restored nothing; 43 folds now active. Content discussed above this point may now render as stubs — hydrate to recover it.]
+
+Noted. [synthetic acknowledgment inserted by origami]
+
+> one shower-thought i had this morning is a custom agent that comes with origami, you pass it a fold id, and it is in charge of that chunk. i am thinking the new funcionality where agents can talk to each other. then if you are hunting down a bug, you have the overall view from the folded code, the agents work out what the problem is. like i said, it is more of a shower-thought
+
+Shower-thought or not, there's a strong version of it — and the strong version fixes the exact problem I hit twenty minutes ago.
+
+What it actually solves
+
+When I hydrated fold-016, the whole fold came into my context. The anchor didn't slice it. For a small fold that's free; for fold-006 (110 KB of pin descriptions) it'd be ~28k tokens to answer one question.
+
+A fold-agent inverts that: the content never enters the orchestrator's context at all. I ask "does your chunk branch on tenant name?" and get back a sentence, not an artifact. That's not a marginal improvement over hydrate — it removes the transport cost entirely, and it makes anchor-slicing unnecessary rather than merely better.
+
+That reframes the idea: it's less "an agent owns a chunk" and more "hydrate returns an answer instead of a document."
+
+Where it breaks, and it's the same wall as last month
+
+Bugs live in the seams, not in the chunks. If a bug were contained in one fold you'd probably have found it already. The ones that need hunting are interaction bugs: A hands B something B didn't expect, or two chunks disagree about an invariant.
+
+An agent that owns only fold-A structurally cannot see that. It has exactly the cross-chunk blindness we characterized for composable KV — a chunk computed without the others in view, answering confidently about a world it can only partly see. Same failure, one layer up the stack. And the same sharp edge: each agent gives a locally correct answer, and the composition of locally correct answers is wrong.
+
+So a naive fold-per-agent debugging swarm has a predictable failure mode: forty-three agents each report "not me," and the bug is in the handshake nobody owns.
+
+The fix is the split you've been applying all week
+
+Keep interfaces central; distribute implementations.
+
+- The orchestrator holds the signatures and call graph — who calls what, with what types. That's cheap: the function index from earlier, or far less if you keep only edges.
+- Fold-agents hold bodies.
+
+Then the orchestrator can reason about the seam — which is where the bug is — and dispatch body-level questions to whoever owns the relevant implementation. That's the same inversion as ports/security, and the same one as "AgentOS declares inference, doesn't own it." Interface up, implementation out.
+
+You already have both halves as capabilities: ripwire does blast-radius and who-calls-what, and treesitter does symbol extraction. The call-graph tier isn't speculative.
+
+Two smaller cautions
+
+Don't eager-spawn. 43 folds is 43 contexts, each re-establishing itself and reporting back — the delegation-overhead problem. Spawn on suspicion, from the call graph, not on fold creation.
+
+Read-only is most of the value and none of the risk. "In charge of" could mean answers questions, or could mean edits. Forty-three agents writing to one tree is the coordination problem your multiagent guidance specifically warns about. Question-answering fold-agents get you the debugging win without it.
+
+And keep the topology a star, not a mesh. Agents reporting to a coordinator preserves the audit trail and keeps the platform in the middle of every hop — peer-to-peer chat scales n² and makes provenance hard, which is a line your protocol already holds elsewhere.
+
+The cheap test
+
+Before any agent infrastructure: the whole idea rests on one claim — that a worker answering questions about a fold beats hydrating the fold. That's testable today with a single subagent and zero new machinery. Give one agent one fold, ask it three questions you'd otherwise have hydrated for, compare answer quality and token cost against just pulling the fold.
+
+If it wins, the architecture question becomes worth having. If it doesn't, you've saved yourself building a swarm — and you'd have learned it in an afternoon, which is the same shape as the placebo-note ablation and the KV-divergence probe. You've got a good habit going of finding the one measurement that makes the expensive build unnecessary.
+
+✻ Brewed for 59s · done 7:20 AM
+
+> yes, the agents can answer questions, when the main claude thinks it has formulated a plan it can the hydrate the pertinent files. let the main agent do editing
+
+That's the right shape, and it has one load-bearing property worth naming explicitly:
+
+Never edit from a report. Edit from the artifact.
+
+The fold-agent's answer is a paraphrase — that's the whole point, it's cheap because it's lossy. Editing from a paraphrase is the drift problem I hit with that README quote, but with write consequences. Hydrating before you touch anything closes it. That rule generalizes past origami, and it's the kind of thing worth stating as an invariant rather than leaving as a habit.
+
+Why the fold-agents can be much worse than you'd expect
+
+Your two-bar framework maps onto this cleanly, and it sets the quality target:
+
+- Reconnaissance is Bar 1. The agents only need to rank — "is the problem more likely in your chunk than in his." Relative ordering, not fidelity.
+- Editing is Bar 2. Exact bytes, no drift tolerated.
+
+Which means the fold-agents can be Haiku-class and still work, because a ranking function tolerates noise that a generator doesn't. Cheap and parallel for the scatter, expensive and serial for the commit — your hybrid-routing doctrine, applied at a new layer.
+
+The sharp edge: origami acquires the bug it was built to fix
+
+The main agent edits a file. That file's fold is now stale. So is any fold-agent holding it. Ask a question ten minutes later and you get an answer about code that no longer exists.
+
+That is precisely the stale-file-in-context problem that started the composable-KV thread — a superseded version still answering questions as though current. Origami reproduces it internally the moment writes enter the loop.
+
+The good news is that single-writer makes it tractable: exactly one actor mutates, so you always know when to invalidate and what. A mesh of editing agents would make this nearly unsolvable; your design makes it a hook. But it has to be wired deliberately — invalidate on write, and decide whether a stale fold-agent gets killed or re-briefed.
+
+Two smaller disciplines
+
+Hydrate wider than the plan. The agents told you where they think it is, under blindness. Pull the callers and callees of the change site, not just the change site — blast radius, which is what ripwire already does. The extra tokens are cheap relative to editing the wrong thing.
+
+Be willing to throw the plan away at hydrate time. The plan is formed from reports; the artifact may contradict them. When it does, that's the system working — the artifact corrected the paraphrase — but only if the main agent treats the mismatch as information rather than as an obstacle to route around. Worth making it an explicit step: after hydrating, check the plan's premises against the real code before the first edit.
+
+That last one is the same failure mode as accepting a code review you haven't verified. The pattern keeps recurring: a cheap lossy signal proposes, an expensive exact source disposes, and the whole thing works only if the expensive step is genuinely allowed to overrule.
+
+✻ Cogitated for 40s · done 7:24 AM
+
+> aha! point well taken! that is a central issue that needs fixing. how to track changes in files you already folded
+
+Right. Let me lay out the design space, because the answer isn't one mechanism — it's a few, and they cover different holes.
+
+First: folds aren't uniformly invalidatable
+
+Classify at fold time, because the strategies differ:
+
+┌──────────────────────────────────────┬─────────────────────────────────┬────────────────────────────────────────┐
+│              fold kind               │           stale when            │               trackable?               │
+├──────────────────────────────────────┼─────────────────────────────────┼────────────────────────────────────────┤
+│ file read (Read, cat, sed -n)        │ that file changes               │ cheaply — path + hash                  │
+├──────────────────────────────────────┼─────────────────────────────────┼────────────────────────────────────────┤
+│ search result (grep, rg)             │ any file in the searched set    │ hard — wide blast radius               │
+│                                      │ changes                         │                                        │
+├──────────────────────────────────────┼─────────────────────────────────┼────────────────────────────────────────┤
+│ command output (git log, test run,   │ almost any change               │ not really — it's a timestamped        │
+│ build)                               │                                 │ observation                            │
+├──────────────────────────────────────┼─────────────────────────────────┼────────────────────────────────────────┤
+│ pinned read (git show <sha>:file)    │ never                           │ immutable, mark it so                  │
+└──────────────────────────────────────┴─────────────────────────────────┴────────────────────────────────────────┘
+
+That last row matters more than it looks: a meaningful fraction of folds are immutable by construction and should be exempt from the whole machinery.
+
+Two mechanisms, and you need both
+
+Hook the writer. Single-writer is what makes this tractable — the main agent's edit tool knows exactly which path it touched, so on write you look up folds covering that path and mark them. Precise, instant, zero false positives.
+
+Hash sweep. The hook misses everything out-of-loop: you editing in your IDE, a build regenerating a file, git checkout, another Claude session. So fold-time you record path + content hash; on sweep you re-stat and compare. Use a hash, not mtime+size — a one-character code edit preserves size, and that's the common case.
+
+Neither alone is sufficient. The hook is precise but blind outside the loop; the sweep is comprehensive but coarse.
+
+Granularity: this is the real argument for function-level folds
+
+You asked at the top of the session whether to fold every function. I answered on compression grounds and said file-level was probably the better default. Invalidation is a better argument than compression was.
+
+Edit one function in a 600-line file: a file-level fold goes entirely stale, and you lose the other twenty functions' summaries for no reason. A function-level fold invalidates one entry out of 2,854 and leaves the rest valid.
+
+So the granularity question has a better answer than "how much does it compress." It's how much does one edit destroy.
+
+Three tiers of staleness, not one
+
+Text-level invalidation is necessary but not sufficient — this is the seam problem again:
+
+- Body changed, signature same → callers are fine. Don't touch them.
+- Signature or type changed → callers' text didn't change, but their folds' descriptions may now be wrong. Flag as suspect, don't hard-invalidate.
+- Deleted or renamed → hard invalidate, plus callers are suspect.
+
+You have treesitter for symbol extraction and ripwire for who-calls-what, so the call-graph tier isn't speculative — it's assembling two things that exist.
+
+⚠️ The invalidation must be visible in the rendering
+
+This is the part I'd get wrong if I were building it, so let me be emphatic: marking a fold stale on disk does nothing for me. If the stub still reads as a confident advertisement, I'll use it as one. I have no way to detect that the underlying file moved — that's the exact self-reporting blindness from earlier.
+
+The stub itself has to carry it:
+
+[origami fold-012 · ⚠️ STALE — file changed after your edit at 07:23 · hydrate for current]
+
+A silently-stale fold is strictly worse than no fold, because it converts "I don't know" into "I confidently know something outdated."
+
+Fold-agents: kill, don't re-brief
+
+If a fold-agent holds the content and the fold goes stale, the agent is stale — the old text is sitting in its context. You can't mark an agent stale; you either kill it or re-brief it.
+
+Kill it. Re-briefing means surgically replacing the stale span in a live context while keeping everything after — that's the splice problem, the hard one. Killing and respawning is truncate-and-restart, the easy one. You concluded three weeks ago to build truncate before splice; this is the same fork, and the same answer.
+
+Respawn is cheap anyway: the agent's whole job is to re-read one fold and answer questions about it.
