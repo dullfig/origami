@@ -93,6 +93,11 @@ claude plugin install origami@dullfig-plugins
 or interactively: `/plugins` → dullfig-plugins → origami. To try it from a
 checkout without installing, launch with `--plugin-dir /path/to/origami`.
 
+A marketplace install can't set the flag for you: if you install without it,
+origami still loads (a classic hook fires regardless) and announces the
+missing step at session start instead of silently doing nothing. Run
+`/origami:enable` once — it performs that one setup step for you.
+
 Nothing else is required: no Node/Python dependencies, no API key, no
 separate server process — the whole plugin is one TypeScript function-hooks
 module.
