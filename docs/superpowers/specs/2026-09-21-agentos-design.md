@@ -200,3 +200,28 @@ policy. Reason enough to let origami run first.
 4. Mixed-granularity folding (2) + function-level via treesitter, argued by
    invalidation blast-radius (3) not compression.
 5. The two hazards (8) as explicit beta-scrutiny targets.
+
+## Cheap-test RESULT (2026-09-21, run): fold-agent PASSES decisively
+
+Setup: one read-only sonnet subagent given one fold (runbook.md, 74,626 chars
+≈ 18,657 tokens), three questions — two point-lookups (shard 17 -> 57s, shard
+23 -> 85s) and one SYNTHESIS requiring the whole fold (largest/smallest/count
+of 24 shard drain intervals). Ground truth verified against the file.
+
+Result: 3/3 CORRECT, including synthesis (shard 13 @ 103s largest, shard 21 @
+11s smallest, 24 sections), with exact lines quoted (grounded, no confabulation
+in-scope). Orchestrator context cost: ~250 tokens (the agent's returned report)
+vs 18,657 tokens to hydrate the fold — ~75x leaner for equal-or-better answers.
+Agent internal burn 65.6k tokens / 8.7s, isolated off the orchestrator's
+context and critical path (free in dollars on a fixed plan).
+
+BONUS FINDING (the thesis, live): on Q3 the ORCHESTRATOR (setting up the test)
+computed shard 13 = 100 from the formula in its head; the AGENT that actually
+read the file returned 103; the file says 103. The reader of the evidence beat
+the reasoner-from-memory — exactly what origami exists to enforce.
+
+Untested corners (the natural next probes): (a) NEGATIVE CONTROL — a question
+whose answer is NOT in the fold; does the agent say "not in my fold" or
+confabulate? The safety question. (b) HAIKU — do point-lookups and the
+synthesis hold at haiku-class (the economics claim)? Verdict: build the
+fold-query agent; the architecture question is worth having.
