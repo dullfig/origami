@@ -124,8 +124,14 @@ export function foldIdsPresent(messages: readonly SessionMessage[]): Set<string>
 // exact prefix) never mistakes a marker mention for a live stub.
 export function sweepMarkerPair(report: {
   foldedIds: readonly string[]; restoredIds: readonly string[]; activeFolds: number;
+  staleIds?: readonly string[];
 }): SessionMessage[] {
-  const text = `${MARKER_PREFIX} folded ${report.foldedIds.join(', ') || 'nothing'}; restored ${report.restoredIds.join(', ') || 'nothing'}; ${report.activeFolds} folds now active. Content discussed above this point may now render as stubs — hydrate to recover it.]`;
+  // Fold ids stay BARE (no `[origami fold-` prefix) so foldIdsPresent never mistakes
+  // this marker's mentions for live stubs — the same rule the folded/restored lists follow.
+  const stale = report.staleIds && report.staleIds.length
+    ? ` Now STALE (source edited since capture): ${report.staleIds.join(', ')} — hydrate to see the snapshot plus a pointer to re-read the current file.`
+    : '';
+  const text = `${MARKER_PREFIX} folded ${report.foldedIds.join(', ') || 'nothing'}; restored ${report.restoredIds.join(', ') || 'nothing'}; ${report.activeFolds} folds now active.${stale} Content discussed above this point may now render as stubs — hydrate to recover it.]`;
   return [
     { role: 'user', text, toolUses: [] },
     { role: 'assistant', text: 'Noted. [synthetic acknowledgment inserted by origami]', toolUses: [] },

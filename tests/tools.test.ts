@@ -1,6 +1,7 @@
 import { test, expect } from 'claude-code/testing';
-import { handleHydrate, handleUnpin, observeMissedHydrate, readConfig, storeIO } from '../hooks/origami';
+import { handleHydrate, handleUnpin, observeMissedHydrate, observeWrite, readConfig, storeIO } from '../hooks/origami';
 import { putFold, getFold, allFolds, newFoldId } from '../hooks/store';
+import { contentHash } from '../hooks/rebuild';
 import { fakeEngine } from './fake-engine';
 
 const cfg = readConfig(undefined);
@@ -65,6 +66,76 @@ test('a Read matching a live fold logs missed_hydrate; pinned and non-matching d
   await observeMissedHydrate($, { tool: 'Read', input: { file_path: 'b.ts' } });   // pinned = content inline, re-read is fine
   const log2 = String(await $.fs.read('.claude/origami/origami.log'));
   expect(log2.split('\n').filter(l => l.includes('"event":"missed_hydrate"')).length).toBe(1);
+});
+
+// --- v1.1: stale-fold invalidation ---
+
+test('hydrate of an unchanged file-backed fold returns the snapshot with no stale note', async (_kit, on) => {
+  const { $, files } = fakeEngine();
+  const io = await storeIO($);
+  files.set('a.ts', 'ORIGINAL RAW BYTES');                                  // the live file, matching originHash
+  await putFold(io, { ...entry, originHash: contentHash('ORIGINAL RAW BYTES') }, 'THE SNAPSHOT BODY');
+  const h = await handleHydrate($, cfg, 'fold-001');
+  expect(h.includes('THE SNAPSHOT BODY')).toBe(true);
+  expect(h.toLowerCase().includes('stale')).toBe(false);
+});
+
+test('hydrate after the file changed returns the SNAPSHOT plus a stale warning at both ends', async (_kit, on) => {
+  const { $, files } = fakeEngine();
+  const io = await storeIO($);
+  files.set('a.ts', 'ORIGINAL RAW BYTES');
+  await putFold(io, { ...entry, originHash: contentHash('ORIGINAL RAW BYTES') }, 'THE SNAPSHOT BODY');
+  files.set('a.ts', 'EDITED — TOTALLY DIFFERENT NOW');                      // out-of-loop edit
+  const h = await handleHydrate($, cfg, 'fold-001');
+  expect(h.includes('THE SNAPSHOT BODY')).toBe(true);                       // snapshot, what the model saw
+  expect(h.includes('EDITED — TOTALLY DIFFERENT NOW')).toBe(false);         // NEVER the current content
+  expect(h.includes('STALE')).toBe(true);
+  expect(h.includes('a.ts')).toBe(true);                                    // routes to the live path
+  // F9: the warning rides at BOTH ends so a head-truncated preview still shows it
+  expect(h.indexOf('STALE') < h.indexOf('THE SNAPSHOT BODY')).toBe(true);   // head
+  expect(h.lastIndexOf('STALE') > h.indexOf('THE SNAPSHOT BODY')).toBe(true); // tail
+});
+
+test('hydrate after the file was deleted returns the snapshot with a "no longer be read" note, never throws', async (_kit, on) => {
+  const { $, files } = fakeEngine();
+  const io = await storeIO($);
+  files.set('a.ts', 'ORIGINAL RAW BYTES');
+  await putFold(io, { ...entry, originHash: contentHash('ORIGINAL RAW BYTES') }, 'THE SNAPSHOT BODY');
+  files.delete('a.ts');                                                     // moved or deleted
+  const h = await handleHydrate($, cfg, 'fold-001');
+  expect(h.includes('THE SNAPSHOT BODY')).toBe(true);
+  expect(h.toLowerCase().includes('can no longer be read')).toBe(true);
+});
+
+test('a non-file fold (no originHash) is never staleness-checked', async (_kit, on) => {
+  const { $ } = fakeEngine();
+  const io = await storeIO($);
+  // a Grep/command fold: inputKey is not a real path and there is no originHash
+  await putFold(io, { ...entry, tool: 'Grep', inputKey: JSON.stringify({ pattern: 'x' }) }, 'SEARCH SNAPSHOT');
+  const h = await handleHydrate($, cfg, 'fold-001');
+  expect(h.includes('SEARCH SNAPSHOT')).toBe(true);
+  expect(h.toLowerCase().includes('stale')).toBe(false);                    // no fsRead attempted, no warning
+});
+
+test('observeWrite flips the stale flag on folds matching the edited path only', async (_kit, on) => {
+  const { $ } = fakeEngine();
+  const io = await storeIO($);
+  await putFold(io, { ...entry, originHash: 'h' }, 'B');                     // inputKey 'a.ts'
+  await putFold(io, { ...entry, id: 'fold-002', inputKey: 'b.ts' }, 'B');
+  await observeWrite($, { tool: 'Edit', input: { file_path: 'a.ts' } });
+  expect((await getFold(io, 'fold-001'))!.entry.stale).toBe(true);
+  expect((await getFold(io, 'fold-002'))!.entry.stale).toBeFalsy();         // untouched path stays clean
+  const log = String(await $.fs.read('.claude/origami/origami.log'));
+  expect(log.split('\n').filter(l => l.includes('"event":"fold_stale"')).length).toBe(1);
+});
+
+test('observeWrite ignores an evicted fold and a call with no file_path, never throws', async (_kit, on) => {
+  const { $ } = fakeEngine();
+  const io = await storeIO($);
+  await putFold(io, { ...entry, state: 'evicted' }, 'B');
+  await observeWrite($, { tool: 'Edit', input: { file_path: 'a.ts' } });    // matches path but fold is evicted
+  expect((await getFold(io, 'fold-001'))!.entry.stale).toBeFalsy();
+  await observeWrite($, { tool: 'Write', input: { content: 'no path here' } }); // must not throw
 });
 
 // --- finding 3: a tool.call hook must ANSWER, never throw ---
