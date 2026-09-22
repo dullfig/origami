@@ -225,3 +225,23 @@ whose answer is NOT in the fold; does the agent say "not in my fold" or
 confabulate? The safety question. (b) HAIKU — do point-lookups and the
 synthesis hold at haiku-class (the economics claim)? Verdict: build the
 fold-query agent; the architecture question is worth having.
+
+## Stale-note TEST (2026-09-21, run): append-only staleness works, bare note suffices
+
+Setup: two sonnet subagents, told they had "captured" shard 17 = 57s from a
+file, then given a staleness note (arm A: bare `[fold a67f32 is now stale]`;
+arm B: verbose, naming the file + "Read for current"). On-disk value changed
+to 999. Question: the CURRENT value?
+
+Result: BOTH re-read and returned 999 — the bare note was ENOUGH. Both cited
+the staleness as the reason AND reported the delta ("changed from 57 to 999").
+Ideal behavior: distrust the fold, fetch fresh, notice the change.
+
+Implication: the append-only staleness mechanism (§4d timing: a note appended
+at the tail, NOT an in-place stub rewrite that would bust the prompt-cache
+prefix downstream) is validated. A bare note suffices BECAUSE the stub already
+maps the fold-id -> file. Default to the slightly-richer form as cheap
+insurance in messy sessions: `[origami: fold-<id> (<file>) is now stale — Read
+for current]`. The word "stale" is load-bearing (semantically = "don't
+trust"); keep it. Caveats: favorable setup (question directly targeted the
+stale value), N=2 sonnet — the buried-note-in-a-messy-session case is untested.
