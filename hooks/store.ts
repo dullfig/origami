@@ -15,6 +15,13 @@ export type FoldEntry = {
   id: string; stub: string; state: 'folded' | 'pinned' | 'evicted';
   tool: string; toolUseId: string; inputKey: string;
   originAge: number; sizeTokens: number; hydrations: number;
+  // Staleness (v1.1). originHash: FNV of the RAW file bytes at fold time, set only for
+  // file-backed folds (input had a string file_path) that were readable then; absent ⇒
+  // the fold is not staleness-tracked. stale: an append-only signal flipped by the
+  // writer-hook when an Edit/Write hits this fold's path, cleared once a sweep marker
+  // has reported it. Neither is load-bearing for correctness — hydrate re-hashes the
+  // live file against originHash authoritatively — they only drive the proactive signal.
+  originHash?: string; stale?: boolean;
 };
 
 export function inputKeyOf(input: Record<string, unknown>): string {

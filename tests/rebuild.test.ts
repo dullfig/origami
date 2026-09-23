@@ -155,6 +155,18 @@ test('sweepMarkerPair renders empty folded/restored lists as "nothing"', async (
   expect(user.text).toContain('0 folds now active');
 });
 
+test('sweepMarkerPair announces stale ids as a bare, anchor-safe segment; omits it when none', async () => {
+  const [withStale] = sweepMarkerPair({ foldedIds: [], restoredIds: [], activeFolds: 2, staleIds: ['fold-013', 'fold-014'] });
+  expect(withStale.text).toContain('STALE');
+  expect(withStale.text).toContain('fold-013, fold-014');
+  // bare ids, never the stub prefix — foldIdsPresent must not immortalize them
+  expect(withStale.text.includes('[origami fold-')).toBe(false);
+  expect(foldIdsPresent([{ role: 'user', text: withStale.text, toolUses: [] }]).size).toBe(0);
+  // no stale ids (and the field omitted entirely) => no STALE segment at all
+  const [none] = sweepMarkerPair({ foldedIds: ['fold-001'], restoredIds: [], activeFolds: 1 });
+  expect(none.text.includes('STALE')).toBe(false);
+});
+
 test('foldIdsPresent: a marker mention of a fold id is NOT stub presence; a real stub is', async () => {
   const [marker] = sweepMarkerPair({ foldedIds: ['fold-013'], restoredIds: [], activeFolds: 1 });
   const withMarkerOnly: SessionMessage[] = [{ role: 'user', text: marker.text, toolUses: [] }];

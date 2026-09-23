@@ -46,7 +46,7 @@ function completeWith($: EngineInterface): CompleteFn {
 }
 
 // Keep in sync with .claude-plugin/plugin.json's "version".
-export const ORIGAMI_VERSION = '1.0.5';
+export const ORIGAMI_VERSION = '1.1.0';
 
 export type OrigamiConfig = {
   foldAgeTurns: number;
@@ -295,7 +295,16 @@ export async function runSweep(
       const c = candidates.find(x => x.toolUseId === d.toolUseId)!;
       const id = await newFoldId(io);
       const stub = d.stub.replaceAll('hydrate://FOLD#', `hydrate://${id}#`); // librarian writes the FOLD token; the real id lands here
-      const entry: FoldEntry = { id, stub, state: 'folded', tool: c.tool, toolUseId: c.toolUseId, inputKey: inputKeyOf(c.input), originAge: c.ageTurns, sizeTokens: c.sizeTokens, hydrations: 0 };
+      // Staleness fingerprint: for a file-backed fold, hash the RAW file bytes now so a
+      // later hydrate can tell whether the file changed since. We hash the raw file (not
+      // the fold body, which is the line-numbered Read RESULT) because only the raw file
+      // is reproducible at hydrate time — like-for-like. Unreadable here ⇒ leave unset.
+      let originHash: string | undefined;
+      if (typeof c.input.file_path === 'string') {
+        try { originHash = contentHash(await io.fsRead(c.input.file_path)); }
+        catch { /* not readable at fold time — this fold is simply not staleness-tracked */ }
+      }
+      const entry: FoldEntry = { id, stub, state: 'folded', tool: c.tool, toolUseId: c.toolUseId, inputKey: inputKeyOf(c.input), originAge: c.ageTurns, sizeTokens: c.sizeTokens, hydrations: 0, ...(originHash ? { originHash } : {}) };
       // body is c.text VERBATIM; the header rides in its own slot so restores are
       // byte-exact and refolding a restored body cannot nest a second header
       pending.push({ entry, body: c.text, header: `# ${id} · ${c.tool} ${JSON.stringify(c.input)}` });
@@ -315,7 +324,14 @@ export async function runSweep(
     for (const p of pending) await putFold(io, p.entry, p.body, p.header);
     await io.storeSet(LAST_SKIP_MASS, 0);
     await io.storeSet(AGGRESSIVE, false);
-    const activeFolds = (await allFolds(io)).filter(f => f.state === 'folded').length;
+    const all = await allFolds(io);
+    const activeFolds = all.filter(f => f.state === 'folded').length;
+    // Newly-stale folds (writer-hook flagged) get announced once, then the flag is
+    // cleared: the marker is a permanent historical note, so re-listing every sweep
+    // would be noise. Correctness does not depend on the flag — a still-stale fold is
+    // re-caught by hydrate's re-hash; a fresh edit re-flags it for the next marker.
+    const staleIds = all.filter(f => f.stale && f.state !== 'evicted').map(f => f.id);
+    for (const f of all) if (f.stale && f.state !== 'evicted') await setFold(io, { ...f, stale: false });
     // Reuse the original banner pair (same object references) when its text is
     // already current; otherwise rebuild it (migration bust: old-style count-bearing
     // banner, or a version bump). Either way, append this sweep's marker pair at the
@@ -324,6 +340,7 @@ export async function runSweep(
       foldedIds: foldDecisions.map(d => d.foldId),
       restoredIds: restores.map(r => r.foldId),
       activeFolds,
+      staleIds,
     });
     const finalMessages = bannerUnchanged
       ? [e.messages[0], e.messages[1], ...outcome.messages, ...marker]
@@ -363,15 +380,35 @@ export async function handleHydrate($: EngineInterface, cfg: OrigamiConfig, fold
     const pinned = hydrations >= cfg.pinAfterHydrations && found.entry.state === 'folded';
     await setFold(io, { ...found.entry, hydrations, state: pinned ? 'pinned' : found.entry.state });
     await appendLog(io, { event: 'hydrate', foldId, hydrations, originAge: found.entry.originAge, ...(anchor ? { anchor } : {}) });
-    const note = pinned
+    // Staleness verification: for a file-backed fold, re-read the live file and compare
+    // its hash to the one taken at fold time. The body we return is ALWAYS the snapshot
+    // (what the model originally saw); a mismatch only adds a warning that routes to the
+    // live path. Annotate, never falsify — swapping in current content would break the
+    // fold's identity. Absent originHash ⇒ not tracked (non-file fold) ⇒ no check.
+    let staleLine = '';
+    if (found.entry.originHash) {
+      try {
+        const current = contentHash(await io.fsRead(found.entry.inputKey));
+        if (current !== found.entry.originHash) {
+          staleLine = `⚠️ origami: this fold is STALE — ${found.entry.inputKey} was edited after it was captured. The content below is the snapshot you originally read; Read ${found.entry.inputKey} for its current state before acting on it.`;
+        }
+      } catch {
+        staleLine = `⚠️ origami: ${found.entry.inputKey} can no longer be read (moved or deleted); the content below is your original snapshot, not the current file.`;
+      }
+    }
+    const pinNote = pinned
       ? `\n\n[origami: ${foldId} has now been hydrated ${hydrations}× and is pinned — it will be restored inline and stay open. Call unpin("${foldId}") if that stops being useful.]`
       : found.entry.state === 'evicted'
         ? `\n\n[origami: ${foldId} is evicted — its stub is no longer in the conversation, so it will not be restored inline. The content above is still the full stored body.]`
         : '';
-    // F9: the pin notice rides at BOTH ends. A large body may be preview-truncated
-    // (head only) in the model's view, so a tail-only notice can be lost entirely.
-    const lead = pinned ? note.trimStart() + '\n\n' : '';
-    return lead + (found.header ? found.header + '\n\n' : '') + found.body + note;
+    const staleBlock = staleLine ? `\n\n[${staleLine}]` : '';
+    // F9: staleness and pin notices ride at BOTH ends. A large body may be preview-
+    // truncated (head only) in the model's view, so a tail-only notice can be lost.
+    const leadBits: string[] = [];
+    if (staleLine) leadBits.push(`[${staleLine}]`);
+    if (pinned) leadBits.push(pinNote.trimStart());
+    const lead = leadBits.length ? leadBits.join('\n\n') + '\n\n' : '';
+    return lead + (found.header ? found.header + '\n\n' : '') + found.body + staleBlock + pinNote;
   } catch (err) {
     return `origami could not hydrate "${foldId}": ${err instanceof Error ? err.message : String(err)}. The stored body may have been removed; re-run the original tool if you need the content.`;
   }
@@ -401,6 +438,28 @@ export async function observeMissedHydrate(
     const key = inputKeyOf(call.input);
     const match = (await allFolds(io)).find(f => f.state === 'folded' && f.tool === 'Read' && f.inputKey === key);
     if (match) await appendLog(io, { event: 'missed_hydrate', foldId: match.id, tool: call.tool, inputKey: key });
+  } catch { /* observation must never break a tool call */ }
+}
+
+// The writer-hook (v1.1 staleness): an Edit/Write to a path with live file-backed
+// fold(s) means those snapshots no longer match disk. Flip the append-only `stale`
+// flag so the next sweep marker can announce it proactively. This is a HINT only —
+// hydrate re-hashes the live file authoritatively, so a miss here (a subagent edit,
+// an out-of-loop change) is still caught at the point of use. Observe-only: it reads
+// and writes the fold index but never blocks, rewrites, or throws into the tool call.
+export async function observeWrite(
+  $: EngineInterface, call: { tool: string; input: Record<string, unknown> },
+): Promise<void> {
+  try {
+    if (typeof call.input.file_path !== 'string') return; // Edit/Write/MultiEdit carry file_path
+    const io = await storeIO($);
+    const key = inputKeyOf(call.input);
+    for (const f of await allFolds(io)) {
+      if (f.inputKey === key && f.state !== 'evicted' && !f.stale) {
+        await setFold(io, { ...f, stale: true });
+        await appendLog(io, { event: 'fold_stale', foldId: f.id, tool: call.tool, inputKey: key });
+      }
+    }
   } catch { /* observation must never break a tool call */ }
 }
 
@@ -484,8 +543,13 @@ export const register: Register = (on, options) => {
   on('tool.call', async ($, e, next) => {
     // observe-only middleware: never blocks, never rewrites; main thread only
     const call = e as unknown as { tool: string; agentId?: string; [k: string]: unknown };
-    if (!call.agentId && call.tool === 'Read') {
-      await observeMissedHydrate($, { tool: call.tool, input: call as unknown as Record<string, unknown> });
+    if (!call.agentId) {
+      const input = call as unknown as Record<string, unknown>;
+      if (call.tool === 'Read') {
+        await observeMissedHydrate($, { tool: call.tool, input });
+      } else if (call.tool === 'Edit' || call.tool === 'Write' || call.tool === 'MultiEdit') {
+        await observeWrite($, { tool: call.tool, input });
+      }
     }
     return next(e);
   });
