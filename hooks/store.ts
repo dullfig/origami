@@ -17,11 +17,14 @@ export type FoldEntry = {
   originAge: number; sizeTokens: number; hydrations: number;
   // Staleness (v1.1). originHash: FNV of the RAW file bytes at fold time, set only for
   // file-backed folds (input had a string file_path) that were readable then; absent ⇒
-  // the fold is not staleness-tracked. stale: an append-only signal flipped by the
-  // writer-hook when an Edit/Write hits this fold's path, cleared once a sweep marker
-  // has reported it. Neither is load-bearing for correctness — hydrate re-hashes the
-  // live file against originHash authoritatively — they only drive the proactive signal.
-  originHash?: string; stale?: boolean;
+  // no hash to re-verify against. stale: a PERSISTENT flag flipped by the writer-hook
+  // when an Edit/Write hits this fold's path; it stays set (so hydrate can honor it even
+  // for un-hashed folds) until the fold is superseded or a re-hash proves the file
+  // matches again. staleAnnounced: bookkeeping so the sweep marker names a newly-stale
+  // fold ONCE without clearing `stale`. Legibility (v1.1.1): the marker and hydrate must
+  // never disagree — a knowledge-free agent can't reconcile "marker says stale, hydrate
+  // is silent" — so hydrate warns on (stale === true) OR (originHash mismatch).
+  originHash?: string; stale?: boolean; staleAnnounced?: boolean;
 };
 
 export function inputKeyOf(input: Record<string, unknown>): string {

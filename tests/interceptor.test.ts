@@ -237,6 +237,49 @@ test('two sweeps: banner kept by reference (idempotent), existing stubs are not 
   expect((await getFold(io, 'fold-002'))!.body).toBe('OTHER '.repeat(3000));
 });
 
+// --- v1.1.1: stale folds are ANNOUNCED once by the marker, but the flag PERSISTS ---
+
+test('a pre-existing stale fold is named once by the sweep marker; the stale flag persists and is not re-announced', async () => {
+  const fake = fakeEngine();
+  const io = await storeIO(fake.$);
+  fake.setModelComplete(foldEverything);
+  // a live fold (its stub is present in the transcript, so reconcile keeps it) that a
+  // writer-hook already flagged stale, not yet announced
+  await putFold(io, {
+    id: 'fold-000', stub: 's', state: 'folded', tool: 'Read', toolUseId: 'tOld',
+    inputKey: 'x.ts', originAge: 5, sizeTokens: 4000, hydrations: 0,
+    stale: true, staleAnnounced: false,
+  }, 'STALE BODY');
+  const t = transcript();
+  t[0] = { ...t[0], text: 'turn0 — see [origami fold-000 · Read result folded] s' };
+
+  const first = await runSweep(fake.$, cfg, { trigger: 'plugin', messages: t });
+  if (!('messages' in first!) || !first.messages) throw new Error('expected a rebuilt sweep');
+  const marker = first.messages.slice(-2)[0];
+  expect(marker.text).toContain('Now STALE');
+  expect(marker.text).toContain('fold-000');                          // named this sweep
+  const after = (await getFold(io, 'fold-000'))!.entry;
+  expect(after.stale).toBe(true);                                     // PERSISTS (hydrate keeps agreeing)
+  expect(after.staleAnnounced).toBe(true);                           // announced ⇒ won't be re-listed
+
+  // the conversation continues with NEW foldable mass, so the second sweep runs and
+  // emits its own marker — which must NOT re-announce the still-stale fold-000
+  const second: SessionMessage[] = [...first.messages];
+  second.push({ role: 'user', text: 'turn9', toolUses: [], handle: 'hu9' });
+  second.push({ role: 'assistant', text: '', toolUses: [{ tool_use_id: 't2', tool: 'Read', input: { file_path: 'b.ts' } }], handle: 'h90' });
+  second.push({ role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 't2', text: 'OTHER '.repeat(3000), isError: false }], handle: 'h91' });
+  for (let i = 10; i <= 13; i++) {
+    second.push({ role: 'user', text: `turn${i}`, toolUses: [], handle: `hu${i}` });
+    second.push({ role: 'assistant', text: `r${i}`, toolUses: [], handle: `ha${i}` });
+  }
+  const r2 = await runSweep(fake.$, cfg, { trigger: 'plugin', messages: second });
+  if (!('messages' in r2!) || !r2.messages) throw new Error('expected a rebuilt second sweep');
+  const marker2 = r2.messages.slice(-2)[0];
+  expect(marker2.text).toContain('folded fold-002');                  // the second sweep really ran
+  expect(marker2.text.includes('Now STALE')).toBe(false);             // fold-000 not re-announced
+  expect((await getFold(io, 'fold-000'))!.entry.stale).toBe(true);    // still stale for hydrate
+});
+
 // --- finding 6: fold-entry lifecycle ---
 
 test('a folded entry whose stub has vanished is evicted, not counted, not matched', async () => {

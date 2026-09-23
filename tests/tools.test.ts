@@ -123,10 +123,37 @@ test('observeWrite flips the stale flag on folds matching the edited path only',
   await putFold(io, { ...entry, originHash: 'h' }, 'B');                     // inputKey 'a.ts'
   await putFold(io, { ...entry, id: 'fold-002', inputKey: 'b.ts' }, 'B');
   await observeWrite($, { tool: 'Edit', input: { file_path: 'a.ts' } });
-  expect((await getFold(io, 'fold-001'))!.entry.stale).toBe(true);
+  const f1 = (await getFold(io, 'fold-001'))!.entry;
+  expect(f1.stale).toBe(true);
+  expect(f1.staleAnnounced).toBe(false);                                    // reset so the next marker names it once
   expect((await getFold(io, 'fold-002'))!.entry.stale).toBeFalsy();         // untouched path stays clean
   const log = String(await $.fs.read('.claude/origami/origami.log'));
   expect(log.split('\n').filter(l => l.includes('"event":"fold_stale"')).length).toBe(1);
+});
+
+test('hydrate warns on the persistent stale flag alone (un-hashed fold), so it never contradicts the marker', async (_kit, on) => {
+  const { $ } = fakeEngine();
+  const io = await storeIO($);
+  // a pre-1.1.0 / un-hashed fold: no originHash, but the writer-hook flagged it stale
+  await putFold(io, { ...entry, stale: true }, 'THE SNAPSHOT BODY');
+  const h = await handleHydrate($, cfg, 'fold-001');
+  expect(h.includes('THE SNAPSHOT BODY')).toBe(true);
+  expect(h.includes('STALE')).toBe(true);                                   // agrees with the marker, no re-hash needed
+  expect(h.indexOf('STALE') < h.indexOf('THE SNAPSHOT BODY')).toBe(true);   // both ends
+  expect(h.lastIndexOf('STALE') > h.indexOf('THE SNAPSHOT BODY')).toBe(true);
+});
+
+test('hydrate self-heals a stale flag when the live file matches the captured hash again', async (_kit, on) => {
+  const { $, files } = fakeEngine();
+  const io = await storeIO($);
+  files.set('a.ts', 'ORIGINAL RAW BYTES');
+  // flag says stale, but the file's bytes match originHash (edited then reverted / false alarm)
+  await putFold(io, { ...entry, originHash: contentHash('ORIGINAL RAW BYTES'), stale: true, staleAnnounced: true }, 'BODY');
+  const h = await handleHydrate($, cfg, 'fold-001');
+  expect(h.toLowerCase().includes('stale')).toBe(false);                    // re-hash matches ⇒ not stale
+  const healed = (await getFold(io, 'fold-001'))!.entry;
+  expect(healed.stale).toBe(false);                                         // flag cleared so marker won't re-assert
+  expect(healed.staleAnnounced).toBe(false);
 });
 
 test('observeWrite ignores an evicted fold and a call with no file_path, never throws', async (_kit, on) => {

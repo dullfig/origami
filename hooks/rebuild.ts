@@ -131,7 +131,13 @@ export function sweepMarkerPair(report: {
   const stale = report.staleIds && report.staleIds.length
     ? ` Now STALE (source edited since capture): ${report.staleIds.join(', ')} — hydrate to see the snapshot plus a pointer to re-read the current file.`
     : '';
-  const text = `${MARKER_PREFIX} folded ${report.foldedIds.join(', ') || 'nothing'}; restored ${report.restoredIds.join(', ') || 'nothing'}; ${report.activeFolds} folds now active.${stale} Content discussed above this point may now render as stubs — hydrate to recover it.]`;
+  // Self-announcing preamble (v1.1.1 legibility): runSweep only ever emits this marker on
+  // a summary-replacing sweep (plugin/manual triggers; auto and precompute never reach
+  // here), so it can state plainly that this rebuild stands IN PLACE of the stock
+  // compaction summary. Without it, a knowledge-free agent sees a compaction with no
+  // summary and cannot tell whether origami worked or the hooks reset — the exact
+  // confusion observed in a live smoke session.
+  const text = `${MARKER_PREFIX} this is origami's in-place rebuild of the context — not a stock compaction summary; nothing was lost, earlier turns remain, and any that were folded now render as origami stubs. This sweep folded ${report.foldedIds.join(', ') || 'nothing'}; restored ${report.restoredIds.join(', ') || 'nothing'}; ${report.activeFolds} folds now active.${stale} Content discussed above this point may now render as stubs — hydrate to recover it.]`;
   return [
     { role: 'user', text, toolUses: [] },
     { role: 'assistant', text: 'Noted. [synthetic acknowledgment inserted by origami]', toolUses: [] },
