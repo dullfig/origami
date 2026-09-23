@@ -46,7 +46,7 @@ function completeWith($: EngineInterface): CompleteFn {
 }
 
 // Keep in sync with .claude-plugin/plugin.json's "version".
-export const ORIGAMI_VERSION = '1.1.0';
+export const ORIGAMI_VERSION = '1.1.1';
 
 export type OrigamiConfig = {
   foldAgeTurns: number;
@@ -326,12 +326,16 @@ export async function runSweep(
     await io.storeSet(AGGRESSIVE, false);
     const all = await allFolds(io);
     const activeFolds = all.filter(f => f.state === 'folded').length;
-    // Newly-stale folds (writer-hook flagged) get announced once, then the flag is
-    // cleared: the marker is a permanent historical note, so re-listing every sweep
-    // would be noise. Correctness does not depend on the flag — a still-stale fold is
-    // re-caught by hydrate's re-hash; a fresh edit re-flags it for the next marker.
-    const staleIds = all.filter(f => f.stale && f.state !== 'evicted').map(f => f.id);
-    for (const f of all) if (f.stale && f.state !== 'evicted') await setFold(io, { ...f, stale: false });
+    // Newly-stale folds get NAMED once (announce-once via staleAnnounced), but `stale`
+    // itself PERSISTS so hydrate keeps agreeing with this announcement — clearing it here
+    // was the v1.1.1 legibility bug (marker said stale, a later hydrate of an un-hashed
+    // fold stayed silent). The flag clears only on self-heal (hydrate re-hash matches) or
+    // supersession. A fresh edit resets staleAnnounced, so a re-edit re-announces.
+    const staleIds = all.filter(f => f.stale && !f.staleAnnounced && f.state !== 'evicted').map(f => f.id);
+    for (const id of staleIds) {
+      const f = all.find(x => x.id === id)!;
+      await setFold(io, { ...f, staleAnnounced: true });
+    }
     // Reuse the original banner pair (same object references) when its text is
     // already current; otherwise rebuild it (migration bust: old-style count-bearing
     // banner, or a version bump). Either way, append this sweep's marker pair at the
@@ -378,24 +382,35 @@ export async function handleHydrate($: EngineInterface, cfg: OrigamiConfig, fold
     if (!found) return `Unknown fold id "${foldId}". Fold ids look like fold-001 and appear in [origami fold-…] stubs in the conversation.`;
     const hydrations = found.entry.hydrations + 1;
     const pinned = hydrations >= cfg.pinAfterHydrations && found.entry.state === 'folded';
-    await setFold(io, { ...found.entry, hydrations, state: pinned ? 'pinned' : found.entry.state });
-    await appendLog(io, { event: 'hydrate', foldId, hydrations, originAge: found.entry.originAge, ...(anchor ? { anchor } : {}) });
-    // Staleness verification: for a file-backed fold, re-read the live file and compare
-    // its hash to the one taken at fold time. The body we return is ALWAYS the snapshot
-    // (what the model originally saw); a mismatch only adds a warning that routes to the
-    // live path. Annotate, never falsify — swapping in current content would break the
-    // fold's identity. Absent originHash ⇒ not tracked (non-file fold) ⇒ no check.
+    // Staleness (computed BEFORE the state write so a self-heal folds into one setFold).
+    // The body returned is ALWAYS the snapshot the model saw; staleness only adds a
+    // warning that routes to the live path. Annotate, never falsify. Two detectors, and
+    // hydrate warns on their UNION so it can never contradict the sweep marker (which
+    // fires off the writer-hook flag): (1) the persistent `stale` flag set by an in-loop
+    // Edit — the only signal for un-hashed / pre-1.1.0 folds; (2) an originHash mismatch,
+    // which also catches OUT-of-loop edits the writer-hook never saw. When a fold carries
+    // originHash and the live file now matches it (edited then reverted, or a
+    // conservative flag), we self-heal: clear the flag so marker and hydrate stay agreed.
+    const editedMsg = `⚠️ origami: this fold is STALE — ${found.entry.inputKey} was edited after it was captured. The content below is the snapshot you originally read; Read ${found.entry.inputKey} for its current state before acting on it.`;
     let staleLine = '';
+    let clearStale = false;
     if (found.entry.originHash) {
       try {
         const current = contentHash(await io.fsRead(found.entry.inputKey));
-        if (current !== found.entry.originHash) {
-          staleLine = `⚠️ origami: this fold is STALE — ${found.entry.inputKey} was edited after it was captured. The content below is the snapshot you originally read; Read ${found.entry.inputKey} for its current state before acting on it.`;
-        }
+        if (current !== found.entry.originHash) staleLine = editedMsg;
+        else if (found.entry.stale) clearStale = true;   // live file matches capture ⇒ no longer stale
       } catch {
         staleLine = `⚠️ origami: ${found.entry.inputKey} can no longer be read (moved or deleted); the content below is your original snapshot, not the current file.`;
       }
+    } else if (found.entry.stale) {
+      staleLine = editedMsg;                              // un-hashed fold: the writer-hook flag is authoritative
     }
+    await setFold(io, {
+      ...found.entry, hydrations,
+      state: pinned ? 'pinned' : found.entry.state,
+      ...(clearStale ? { stale: false, staleAnnounced: false } : {}),
+    });
+    await appendLog(io, { event: 'hydrate', foldId, hydrations, originAge: found.entry.originAge, ...(anchor ? { anchor } : {}) });
     const pinNote = pinned
       ? `\n\n[origami: ${foldId} has now been hydrated ${hydrations}× and is pinned — it will be restored inline and stay open. Call unpin("${foldId}") if that stops being useful.]`
       : found.entry.state === 'evicted'
@@ -456,7 +471,8 @@ export async function observeWrite(
     const key = inputKeyOf(call.input);
     for (const f of await allFolds(io)) {
       if (f.inputKey === key && f.state !== 'evicted' && !f.stale) {
-        await setFold(io, { ...f, stale: true });
+        // stale is persistent; staleAnnounced:false so the next sweep marker names it once
+        await setFold(io, { ...f, stale: true, staleAnnounced: false });
         await appendLog(io, { event: 'fold_stale', foldId: f.id, tool: call.tool, inputKey: key });
       }
     }
